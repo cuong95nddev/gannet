@@ -12,4 +12,5 @@ window goes in `crates/gannet`.
 Checks before a commit: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 `cargo run -p gannet -- --capture region` starts a capture without a shortcut,
 `--settings` opens the Settings window. `scripts/install.sh` installs the
-app; releases come from a `v*` tag (see README).
+app; releases come from a `v*` tag (`.github/workflows/release.yml`
+lists the signing secrets).
