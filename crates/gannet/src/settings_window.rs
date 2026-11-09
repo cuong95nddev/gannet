@@ -7,18 +7,20 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use gannet_core::settings::{Action, Mods, Settings, Shortcut};
+use gannet_core::settings::{Action, KEEP_CHOICES, Mods, Settings, Shortcut, ToolbarPlace};
 use gannet_core::store;
 use gpui_kit::component::Theme;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSColor, NSColorSpace, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType};
+use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSEventType};
 
+use crate::icons::{self, IconName};
 use crate::permissions::{self, Status};
 use crate::popup_menu::{self, Item};
-use crate::{capture, hotkeys, prefs};
+use crate::{capture, dock, hotkeys, prefs};
 
 /// macOS's virtual key code for Escape.
 const KEY_ESCAPE: u16 = 0x35;
@@ -75,7 +77,14 @@ struct Pal {
     field_border: Hsla,
     button: Hsla,
     button_border: Hsla,
-    accent: Hsla,
+    /// What is picked or focused: black, or white in the dark.
+    strong: Hsla,
+    /// Words on `strong`.
+    on_strong: Hsla,
+    /// The sidebar's page.
+    selection: Hsla,
+    /// A switch that is on.
+    switch: Hsla,
     danger: Hsla,
     warning: Hsla,
     success: Hsla,
@@ -83,7 +92,6 @@ struct Pal {
 
 impl Pal {
     fn new(dark: bool) -> Pal {
-        let accent = accent_color().unwrap_or(if dark { rgb(0x0a84ff).into() } else { rgb(0x007aff).into() });
         if dark {
             Pal {
                 window: rgb(0x1e1e1e).into(),
@@ -98,7 +106,10 @@ impl Pal {
                 field_border: rgba(0xffffff1f).into(),
                 button: rgba(0xffffff2b).into(),
                 button_border: rgba(0xffffff14).into(),
-                accent,
+                strong: rgb(0xf2f2f2).into(),
+                on_strong: rgb(0x1e1e1e).into(),
+                selection: rgba(0xffffff1a).into(),
+                switch: rgb(0x9a9a9f).into(),
                 danger: rgb(0xff453a).into(),
                 warning: rgb(0xff9f0a).into(),
                 success: rgb(0x30d158).into(),
@@ -117,20 +128,16 @@ impl Pal {
                 field_border: rgba(0x00000026).into(),
                 button: rgb(0xffffff).into(),
                 button_border: rgba(0x00000026).into(),
-                accent,
+                strong: rgb(0x1d1d1f).into(),
+                on_strong: rgb(0xffffff).into(),
+                selection: rgba(0x00000014).into(),
+                switch: rgb(0x1d1d1f).into(),
                 danger: rgb(0xff3b30).into(),
                 warning: rgb(0xc77c02).into(),
                 success: rgb(0x28a745).into(),
             }
         }
     }
-}
-
-/// The accent colour picked in System Settings ▸ Appearance.
-fn accent_color() -> Option<Hsla> {
-    let c = NSColor::controlAccentColor().colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())?;
-    let (r, g, b) = (c.redComponent() as f32, c.greenComponent() as f32, c.blueComponent() as f32);
-    Some(Rgba { r, g, b, a: 1. }.into())
 }
 
 fn is_dark(window: &Window) -> bool {
@@ -221,12 +228,11 @@ impl Page {
         }
     }
 
-    /// The sidebar icon: a glyph on a coloured tile, as System Settings has.
-    fn icon(self) -> (&'static str, u32) {
+    fn icon(self) -> IconName {
         match self {
-            Page::Shortcuts => ("⌘", 0x8e8e93),
-            Page::Captures => ("↓", 0x0a84ff),
-            Page::Permissions => ("✓", 0x34c759),
+            Page::Shortcuts => IconName::Keyboard,
+            Page::Captures => IconName::FolderDown,
+            Page::Permissions => IconName::ShieldCheck,
         }
     }
 }
@@ -263,6 +269,7 @@ impl SettingsView {
                 cx.notify();
             }),
             cx.on_release(|this, cx| {
+                dock::set(dock::Window::Settings, false, cx);
                 if this.recording.take().is_some() {
                     prefs::reapply(cx);
                 }
@@ -270,6 +277,7 @@ impl SettingsView {
         ];
         let fields = Action::ALL.iter().enumerate().map(|(i, _)| cx.focus_handle().tab_index(i as isize).tab_stop(true)).collect();
         window.set_window_title(Page::Shortcuts.title());
+        dock::set(dock::Window::Settings, true, cx);
         let mut this = Self {
             page: Page::Shortcuts,
             screen: permissions::screen_recording(),
@@ -532,7 +540,7 @@ impl SettingsView {
             .bg(pal.field)
             .border_1()
             .border_color(pal.field_border)
-            .when(recording.is_some() || focused, |d| d.border_color(pal.accent).shadow(vec![ring(pal.accent)]))
+            .when(recording.is_some() || focused, |d| d.border_color(pal.strong).shadow(vec![ring(pal.strong)]))
             .text_size(px(13.))
             .text_color(color)
             .cursor_default()
@@ -568,12 +576,76 @@ impl SettingsView {
                     .flex_1()
                     .gap(px(2.))
                     .min_w_0()
-                    .child(div().text_size(px(13.)).text_color(pal.text).child("Save captures to"))
+                    .child(div().text_size(px(13.)).text_color(pal.text).child("Export to"))
                     .child(div().text_size(px(11.)).text_color(pal.secondary).truncate().child(tilde(&dir))),
             )
             .child(button)
             .into_any_element()
     }
+}
+
+/// A segmented control for where the capture toolbar is, if anywhere.
+fn toolbar_choices(current: Option<ToolbarPlace>, pal: Pal) -> Div {
+    let mut seg = div().flex().p(px(2.)).gap(px(2.)).rounded(px(6.)).bg(pal.field).border_1().border_color(pal.field_border);
+    for (i, (place, label)) in
+        [(None, "Off"), (Some(ToolbarPlace::Floating), "Floating"), (Some(ToolbarPlace::MenuBar), "Menu Bar")].into_iter().enumerate()
+    {
+        let on = place == current;
+        seg = seg.child(
+            div()
+                .id(("toolbar", i))
+                .px(px(8.))
+                .h(px(20.))
+                .flex()
+                .items_center()
+                .rounded(px(4.))
+                .text_size(px(12.))
+                .text_color(if on { pal.on_strong } else { pal.text })
+                .when(on, |d| d.bg(pal.strong))
+                .cursor_default()
+                .child(label)
+                .on_click(move |_, _, cx| {
+                    prefs::update(cx, |s| match place {
+                        None => s.toolbar = false,
+                        Some(p) => {
+                            s.toolbar = true;
+                            s.toolbar_place = p;
+                        },
+                    })
+                }),
+        );
+    }
+    seg
+}
+
+/// A segmented control for how long captures are kept.
+/// How many days to keep something, `set` in the settings when picked.
+fn keep_choices(id: &'static str, current: Option<u32>, pal: Pal, set: fn(&mut Settings, Option<u32>)) -> Div {
+    let mut seg = div().flex().p(px(2.)).gap(px(2.)).rounded(px(6.)).bg(pal.field).border_1().border_color(pal.field_border);
+    for (i, days) in KEEP_CHOICES.into_iter().enumerate() {
+        let label = match days {
+            None => "Forever".to_owned(),
+            Some(1) => "1 day".to_owned(),
+            Some(d) => format!("{d} days"),
+        };
+        let on = days == current;
+        seg = seg.child(
+            div()
+                .id((id, i))
+                .px(px(8.))
+                .h(px(20.))
+                .flex()
+                .items_center()
+                .rounded(px(4.))
+                .text_size(px(12.))
+                .text_color(if on { pal.on_strong } else { pal.text })
+                .when(on, |d| d.bg(pal.strong))
+                .cursor_default()
+                .child(label)
+                .on_click(move |_, _, cx| prefs::update(cx, |s| set(s, days))),
+        );
+    }
+    seg
 }
 
 fn v_stack() -> Div {
@@ -622,11 +694,12 @@ fn push_button(id: &'static str, pal: Pal) -> Stateful<Div> {
         .active(|s| s.opacity(0.8))
 }
 
-/// A pop-up button's arrows: up and down chevrons on the accent colour.
+/// A pop-up button's arrows: up and down chevrons.
 fn chevrons(pal: Pal) -> Div {
+    let color = pal.secondary;
     let arrows = canvas(
         |_, _, _| {},
-        |b, _, window, _| {
+        move |b, _, window, _| {
             let (cx, cy) = (b.origin.x + b.size.width / 2., b.origin.y + b.size.height / 2.);
             let (w, h, gap) = (px(3.), px(2.5), px(1.5));
             for dir in [-1., 1.] {
@@ -637,18 +710,18 @@ fn chevrons(pal: Pal) -> Div {
                 path.line_to(point(cx, tip));
                 path.line_to(point(cx + w, base));
                 if let Ok(path) = path.build() {
-                    window.paint_path(path, white());
+                    window.paint_path(path, color);
                 }
             }
         },
     )
     .size_full();
-    div().size(px(16.)).rounded(px(4.)).bg(pal.accent).child(arrows)
+    div().size(px(16.)).child(arrows)
 }
 
 /// The focus ring macOS draws round a focused control.
-fn ring(accent: Hsla) -> BoxShadow {
-    BoxShadow { color: accent.opacity(0.45), offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(3.), inset: false }
+fn ring(color: Hsla) -> BoxShadow {
+    BoxShadow { color: color.opacity(0.2), offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(3.), inset: false }
 }
 
 /// The modifiers held, waiting for a key: `⌃⇧…`.
@@ -689,7 +762,7 @@ impl SettingsView {
     fn sidebar(&self, pal: Pal, cx: &mut Context<Self>) -> AnyElement {
         let items = Page::ALL.into_iter().map(|page| {
             let selected = page == self.page;
-            let (glyph, tile) = page.icon();
+
             div()
                 .id(page.title())
                 .flex()
@@ -700,19 +773,15 @@ impl SettingsView {
                 .rounded(px(6.))
                 .text_size(px(13.))
                 .cursor_default()
-                .when(selected, |d| d.bg(pal.accent).text_color(white()))
+                .when(selected, |d| d.bg(pal.selection).font_weight(FontWeight::MEDIUM))
                 .child(
                     div()
                         .size(px(20.))
-                        .rounded(px(5.))
-                        .bg(rgb(tile))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_color(white())
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(glyph),
+                        .text_color(if selected { pal.text } else { pal.secondary })
+                        .child(icons::icon(page.icon(), 15.)),
                 )
                 .child(page.title())
                 .on_click(cx.listener(move |this, _, window, cx| this.show(page, window, cx)))
@@ -755,7 +824,44 @@ impl SettingsView {
         let settings = prefs::get(cx).clone();
         vec![
             group(pal).child(self.folder_row(&settings, pal, cx)).into_any_element(),
-            note("Done (Enter) copies a capture and saves it here as PNG.", pal),
+            note("Captures are kept encrypted in Gannet's library; Export saves one here as a PNG file.", pal),
+            group(pal)
+                .child(
+                    row(pal, false)
+                        .child(described(
+                            "Capture toolbar",
+                            match settings.toolbar.then_some(settings.toolbar_place) {
+                                None => "Off. Captures start from the menu bar icon or a shortcut.",
+                                Some(ToolbarPlace::Floating) => "Floats above every window; drag it by its grip.",
+                                Some(ToolbarPlace::MenuBar) => {
+                                    "Opens under the menu bar icon when it's clicked. Right-click the icon for the menu."
+                                },
+                            },
+                            pal,
+                        ))
+                        .child(toolbar_choices(settings.toolbar.then_some(settings.toolbar_place), pal)),
+                )
+                .child(
+                    row(pal, true)
+                        .child(described("Open the editor after a capture", "Show each new capture in the library, ready to mark up.", pal))
+                        .child(
+                            Switch::new("open-editor")
+                                .color(pal.switch)
+                                .checked(settings.open_editor)
+                                .on_click(|on, _, cx| prefs::update(cx, |s| s.open_editor = *on)),
+                        ),
+                )
+                .child(
+                    row(pal, true)
+                        .child(described("Keep captures", "Older captures are deleted from the library. Exported files stay.", pal))
+                        .child(keep_choices("keep", settings.keep_days, pal, |s, d| s.keep_days = d)),
+                )
+                .child(
+                    row(pal, true)
+                        .child(described("Empty the trash", "Deleted captures stay in the library's trash this long.", pal))
+                        .child(keep_choices("trash", settings.trash_days, pal, |s, d| s.trash_days = d)),
+                )
+                .into_any_element(),
         ]
     }
 

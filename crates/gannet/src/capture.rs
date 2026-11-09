@@ -1,5 +1,5 @@
 //! A capture from start to end: freeze every display, put the overlay on
-//! each, and deliver the result (clipboard, the captures folder).
+//! each, and deliver the result (clipboard, the library).
 
 use std::time::Duration;
 
@@ -8,7 +8,7 @@ use gpui_kit::*;
 use image::RgbaImage;
 
 use crate::overlay::Overlay;
-use crate::prefs;
+use crate::{library, prefs, scroll, toolbar};
 
 /// What a capture takes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -19,6 +19,9 @@ pub enum Mode {
     Window,
     /// Every display, whole.
     Screen,
+    /// A region picked like [`Mode::Region`], then grabbed again and again
+    /// while what is in it scrolls, stitched into one tall picture.
+    Scroll,
 }
 
 /// Raw grabs are kept at most this long (they are deleted once read).
@@ -28,6 +31,9 @@ const GRABS_KEEP: Duration = Duration::from_secs(3600);
 #[derive(Default)]
 struct Capture {
     on: bool,
+    /// The library window steps aside for this capture (it was asked for
+    /// from the library).
+    hide_library: bool,
     overlays: Vec<AnyWindowHandle>,
 }
 
@@ -38,8 +44,20 @@ pub fn init(cx: &mut App) {
     cx.background_executor().spawn(async { store::cleanup(&store::grabs_dir(), GRABS_KEEP) }).detach();
 }
 
+/// A capture asked for from the library, whose window is put away until
+/// it is over.
+pub fn start_from_library(mode: Mode, cx: &mut App) {
+    cx.global_mut::<Capture>().hide_library = true;
+    start(mode, cx);
+}
+
 pub fn start(mode: Mode, cx: &mut App) {
+    let hide_library = std::mem::take(&mut cx.global_mut::<Capture>().hide_library);
     if cx.global::<Capture>().on {
+        // The shortcut again ends a scrolling capture, keeping it.
+        if mode == Mode::Scroll {
+            scroll::finish(true, cx);
+        }
         return;
     }
     if !grab::has_permission() {
@@ -53,10 +71,25 @@ pub fn start(mode: Mode, cx: &mut App) {
         return;
     }
     cx.global_mut::<Capture>().on = true;
+    // Out of the way of the grab and of the window picker.
+    let toolbar_away = toolbar::step_aside(cx);
+    let library_away = hide_library && library::step_aside(cx);
+    let settle = if toolbar_away || library_away { SETTLE } else { Duration::ZERO };
     match mode {
-        Mode::Window => pick_window(cx),
-        Mode::Region | Mode::Screen => grab_displays(mode, cx),
+        Mode::Window => pick_window(settle, cx),
+        Mode::Region | Mode::Screen | Mode::Scroll => grab_displays(mode, settle, cx),
     }
+}
+
+/// How long the window server takes to drop a window ordered out.
+const SETTLE: Duration = Duration::from_millis(120);
+
+/// The capture is over: another may start, and the toolbar (and the
+/// library, if it stepped aside) come back.
+pub(crate) fn ended(cx: &mut App) {
+    cx.global_mut::<Capture>().on = false;
+    toolbar::come_back(cx);
+    library::come_back(cx);
 }
 
 /// One display's frozen screen.
@@ -66,9 +99,10 @@ struct Grab {
     image: Result<RgbaImage, String>,
 }
 
-fn grab_displays(mode: Mode, cx: &mut App) {
+fn grab_displays(mode: Mode, settle: Duration, cx: &mut App) {
     let displays: Vec<_> = cx.displays().iter().map(|d| (d.id(), d.bounds())).collect();
     cx.spawn(async move |cx| {
+        cx.background_executor().timer(settle).await;
         let grabs = cx
             .background_executor()
             .spawn(async move {
@@ -83,29 +117,37 @@ fn grab_displays(mode: Mode, cx: &mut App) {
             .await;
         cx.update(|cx| match mode {
             Mode::Screen => {
-                cx.global_mut::<Capture>().on = false;
-                let images: Vec<_> =
-                    grabs.into_iter().filter_map(|g| g.image.map_err(|e| log::error!("screen capture failed: {e}")).ok()).collect();
+                ended(cx);
+                let images: Vec<_> = grabs
+                    .into_iter()
+                    .filter_map(|g| {
+                        let img = g.image.map_err(|e| log::error!("screen capture failed: {e}")).ok()?;
+                        let width = g.bounds.size.width.as_f32();
+                        let scale = if width > 0. { img.width() as f32 / width } else { 1. };
+                        Some((img, scale))
+                    })
+                    .collect();
                 if images.is_empty() {
                     notify("Couldn't capture the screen", "See the log for why.", cx);
                 }
-                for img in images {
-                    deliver(img, cx);
+                for (img, scale) in images {
+                    deliver(img, scale, true, cx);
                 }
             },
-            _ => open_overlays(grabs, cx),
+            _ => open_overlays(grabs, mode, cx),
         });
     })
     .detach();
 }
 
-fn pick_window(cx: &mut App) {
+fn pick_window(settle: Duration, cx: &mut App) {
     cx.spawn(async move |cx| {
+        cx.background_executor().timer(settle).await;
         let picked = cx.background_executor().spawn(async move { grab::pick_window(false) }).await;
         cx.update(|cx| {
-            cx.global_mut::<Capture>().on = false;
+            ended(cx);
             match picked {
-                Ok(Some(img)) => deliver(img, cx),
+                Ok(Some(img)) => deliver(img, main_screen_scale(), true, cx),
                 Ok(None) => {},
                 Err(e) => notify("Couldn't capture the window", &e, cx),
             }
@@ -114,7 +156,7 @@ fn pick_window(cx: &mut App) {
     .detach();
 }
 
-fn open_overlays(grabs: Vec<Grab>, cx: &mut App) {
+fn open_overlays(grabs: Vec<Grab>, mode: Mode, cx: &mut App) {
     let mut overlays: Vec<AnyWindowHandle> = Vec::new();
     for Grab { id, bounds, image } in grabs {
         let img = match image {
@@ -140,7 +182,7 @@ fn open_overlays(grabs: Vec<Grab>, cx: &mut App) {
                 ..Default::default()
             },
             cx,
-            |window, cx| cx.new(|cx| Overlay::new(img, size.width.as_f32(), window, cx)),
+            |window, cx| cx.new(|cx| Overlay::new(img, size.width.as_f32(), mode == Mode::Scroll, window, cx)),
         );
         match opened {
             Ok((handle, _)) => {
@@ -156,7 +198,7 @@ fn open_overlays(grabs: Vec<Grab>, cx: &mut App) {
         }
     }
     if overlays.is_empty() {
-        cx.global_mut::<Capture>().on = false;
+        ended(cx);
         notify("Couldn't capture the screen", "See the log for why.", cx);
         return;
     }
@@ -197,37 +239,85 @@ fn cover_display(view: usize) {
 /// Close the overlays (after the current update, which may be one of theirs).
 pub fn close(cx: &mut App) {
     cx.defer(|cx| {
-        let capture = cx.global_mut::<Capture>();
-        capture.on = false;
-        for w in std::mem::take(&mut capture.overlays) {
-            let _ = w.update(cx, |_, w, _| w.remove_window());
-        }
+        remove_overlays(cx);
+        ended(cx);
     });
 }
 
-/// A finished capture: onto the clipboard and into the captures folder.
-pub fn deliver(img: RgbaImage, cx: &mut App) {
-    match store::png_bytes(&img) {
-        Ok(bytes) => cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, bytes))),
-        Err(e) => return notify("Couldn't copy the capture", &e, cx),
-    }
-    let dir = prefs::captures_dir(cx);
-    cx.spawn(async move |cx| {
-        let saved = cx.background_executor().spawn(async move { store::save(&img, &dir) }).await;
-        cx.update(|cx| match saved {
-            Ok(path) => log::info!("saved {}", path.display()),
-            Err(e) => notify("Couldn't save the capture", &e, cx),
-        });
-    })
-    .detach();
+/// Close the overlays, the capture going on without them (a scrolling
+/// capture, which calls [`ended`] when it is over).
+pub fn hand_over(cx: &mut App) {
+    cx.defer(remove_overlays);
 }
 
-/// `img` to a file the user picks.
-pub fn save_as(img: RgbaImage, cx: &mut App) {
-    let rx = cx.prompt_for_new_path(&prefs::captures_dir(cx), Some("Capture.png"));
+fn remove_overlays(cx: &mut App) {
+    for w in std::mem::take(&mut cx.global_mut::<Capture>().overlays) {
+        let _ = w.update(cx, |_, w, _| w.remove_window());
+    }
+}
+
+/// A finished capture (`scale` pixels per point): onto the clipboard and
+/// into the library, encrypted, until the user exports it. With `edit`, it
+/// opens in the editor whatever the setting (a capture taken without the
+/// overlay hasn't been marked up yet).
+pub fn deliver(img: RgbaImage, scale: f32, edit: bool, cx: &mut App) {
+    match store::png_bytes(&img) {
+        Ok(bytes) => cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, bytes))),
+        Err(e) => notify("Couldn't copy the capture", &e, cx),
+    }
+    library::keep(img, scale, edit, cx);
+}
+
+/// The main display's pixels per point.
+pub(crate) fn main_screen_scale() -> f32 {
+    let Some(mtm) = objc2::MainThreadMarker::new() else { return 2. };
+    objc2_app_kit::NSScreen::mainScreen(mtm).map_or(2., |s| s.backingScaleFactor() as f32)
+}
+
+/// The file types a capture can be saved as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Format {
+    Png,
+    Jpeg,
+    Bmp,
+}
+
+impl Format {
+    pub const ALL: [Format; 3] = [Format::Png, Format::Jpeg, Format::Bmp];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Format::Png => "PNG",
+            Format::Jpeg => "JPEG",
+            Format::Bmp => "BMP",
+        }
+    }
+
+    fn ext(self) -> &'static str {
+        match self {
+            Format::Png => "png",
+            Format::Jpeg => "jpg",
+            Format::Bmp => "bmp",
+        }
+    }
+
+    /// Write `img` to `path` in this format (JPEG has no alpha).
+    fn write(self, img: &RgbaImage, path: &std::path::Path) -> image::ImageResult<()> {
+        match self {
+            Format::Png => img.save_with_format(path, image::ImageFormat::Png),
+            Format::Jpeg => image::DynamicImage::ImageRgba8(img.clone()).to_rgb8().save_with_format(path, image::ImageFormat::Jpeg),
+            Format::Bmp => img.save_with_format(path, image::ImageFormat::Bmp),
+        }
+    }
+}
+
+/// `img` to a file the user picks, as `format`.
+pub fn save_as(img: RgbaImage, format: Format, cx: &mut App) {
+    let name = format!("Capture.{}", format.ext());
+    let rx = cx.prompt_for_new_path(&prefs::captures_dir(cx), Some(&name));
     cx.spawn(async move |cx| {
         let Ok(Ok(Some(path))) = rx.await else { return };
-        if let Err(e) = img.save_with_format(&path, image::ImageFormat::Png) {
+        if let Err(e) = format.write(&img, &path) {
             cx.update(|cx| notify("Couldn't save the capture", &e.to_string(), cx));
         }
     })

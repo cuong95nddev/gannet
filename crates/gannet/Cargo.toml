@@ -13,11 +13,13 @@ flume = "0.12"
 gannet-core = { path = "../gannet-core" }
 global-hotkey = "0.8"
 gpui-kit = "=0.7.3"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "webp", "tiff"] }
 log = "0.4"
 lyon_tessellation = "1"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "block2", "NSApplication", "NSColor", "NSColorSpace", "NSEvent", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSButton", "NSControl", "NSView", "NSWindow", "NSScreen", "NSGraphics"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "block2", "NSApplication", "NSColor", "NSColorSpace", "NSEvent", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSButton", "NSControl", "NSView", "NSWindow", "NSScreen", "NSGraphics", "NSPasteboard", "NSPasteboardItem", "NSPanel", "NSSavePanel", "NSOpenPanel"] }
 raw-window-handle = "0.6"
-objc2-foundation = { version = "0.3.2", features = ["NSBundle", "NSError", "NSGeometry", "NSString"] }
+security-framework = "3"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSBundle", "NSError", "NSGeometry", "NSString", "NSURL"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNNotificationSettings", "UNUserNotificationCenter"] }

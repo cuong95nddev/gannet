@@ -82,6 +82,7 @@ fn text_line(text: &str, size: f32, color: Hsla, window: &Window) -> ShapedLine 
 }
 
 /// Paint `shape`; a mosaic averages `base`, the image it is drawn on.
+/// Images are left to the caller.
 pub fn shape(view: View, shape: &Shape, base: &RgbaImage, window: &mut Window, cx: &mut App) {
     let k = view.scale;
     let z = view.zoom();
@@ -127,6 +128,12 @@ pub fn shape(view: View, shape: &Shape, base: &RgbaImage, window: &mut Window, c
             let _ = line.paint(point(c.x - line.width / 2., c.y - lh / 2.), lh, TextAlign::Left, None, window, cx);
         },
         Shape::Mosaic { a, b } => mosaic(view, *a, *b, base, window),
+        Shape::Erase { a, b } => {
+            let (lo, hi) = model::norm(*a, *b);
+            window.paint_quad(fill(Bounds::from_corners(view.pt(lo), view.pt(hi)), hsla(gannet_core::raster::PAPER)));
+        },
+        // Painted by the editor, which has its pixels.
+        Shape::Image { .. } => {},
     }
 }
 

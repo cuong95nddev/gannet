@@ -5,21 +5,22 @@ use std::sync::Arc;
 
 use gannet_core::model::{self, COLORS, Doc, P, Shape, Style, Tool, p};
 use gannet_core::raster::{self, Crop};
-use gannet_core::store;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use image::RgbaImage;
 
-use crate::capture;
+use crate::icons::IconName;
 use crate::paint::{self, View, from_point, hsla, picture, to_point};
+use crate::ui::{bar, icon_button, pill, sep, size_dot, swatch, tip, tool_label};
+use crate::{capture, library, scroll};
 
 const HANDLE: f32 = 8.;
 const BAR_H: f32 = 36.;
 const STYLE_H: f32 = 30.;
 /// The toolbar's width, to place it before it is laid out.
 const BAR_W: f32 = 470.;
+/// The same, for a scrolling capture's.
+const SCROLL_BAR_W: f32 = 210.;
 
 enum Drag {
     Select {
@@ -58,11 +59,16 @@ pub struct Overlay {
     style: Style,
     doc: Doc,
     text: Option<TextEdit>,
+    /// The Save menu, open: where it was asked for, in points.
+    save_menu: Option<P>,
+    /// The region is for a scrolling capture: no markup, Start goes on to it.
+    scroll: bool,
 }
 
 impl Overlay {
-    /// The overlay over `base`, a display `width_pt` points wide.
-    pub fn new(base: RgbaImage, width_pt: f32, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// The overlay over `base`, a display `width_pt` points wide; with
+    /// `scroll`, the region picked is for a scrolling capture.
+    pub fn new(base: RgbaImage, width_pt: f32, scroll: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let scale = if width_pt > 0. { base.width() as f32 / width_pt } else { 1. };
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
@@ -77,6 +83,8 @@ impl Overlay {
             style: Style::default(),
             doc: Doc::new(scale),
             text: None,
+            save_menu: None,
+            scroll,
         }
     }
 
@@ -101,6 +109,10 @@ impl Overlay {
 
     fn on_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let q = from_point(ev.position);
+        if self.save_menu.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.text.is_some() {
             self.commit_text(window, cx);
             return;
@@ -176,7 +188,7 @@ impl Overlay {
                         points.push(at)
                     }
                 },
-                Shape::Text { .. } | Shape::Marker { .. } => {},
+                Shape::Text { .. } | Shape::Marker { .. } | Shape::Image { .. } | Shape::Erase { .. } => {},
             },
         }
         cx.notify();
@@ -238,7 +250,17 @@ impl Overlay {
         }
         let ks = &ev.keystroke;
         let m = ks.modifiers;
+        if self.scroll {
+            match ks.key.as_str() {
+                "escape" if self.drag.is_some() => self.drag = None,
+                "escape" => return capture::close(cx),
+                "enter" if self.sel.is_some() => return self.done(window, cx),
+                _ => return,
+            }
+            return cx.notify();
+        }
         match ks.key.as_str() {
+            "escape" if self.save_menu.is_some() => self.save_menu = None,
             "escape" if self.drag.is_some() => self.drag = None,
             "escape" => return capture::close(cx),
             "enter" if self.sel.is_some() => return self.done(window, cx),
@@ -248,8 +270,9 @@ impl Overlay {
             "z" if m.secondary() => {
                 self.doc.undo();
             },
-            "c" if m.secondary() => return self.copy(cx),
-            "s" if m.secondary() => return self.save_as(cx),
+            "c" if m.secondary() && self.sel.is_some() => return self.done(window, cx),
+            "e" if m.secondary() && self.sel.is_some() => return self.edit(cx),
+            "s" if m.secondary() => return self.save_as(capture::Format::Png, cx),
             key if !m.platform && !m.control && !m.alt && self.sel.is_some() => {
                 let tool = match key {
                     "r" => Tool::Rect,
@@ -292,31 +315,37 @@ impl Overlay {
         }
     }
 
-    /// Enter's action: copy and save the region with its markup.
-    fn done(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.finish_text(cx);
-        let Some(img) = self.export() else { return };
-        capture::close(cx);
-        capture::deliver(img, cx);
-    }
-
-    /// Only onto the clipboard.
-    fn copy(&mut self, cx: &mut Context<Self>) {
-        self.finish_text(cx);
-        let Some(img) = self.export() else { return };
-        capture::close(cx);
-        match store::png_bytes(&img) {
-            Ok(bytes) => cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, bytes))),
-            Err(e) => capture::notify("Couldn't copy the capture", &e, cx),
+    /// Enter's action: copy the region with its markup, and keep it in the
+    /// library.
+    /// For a scrolling capture, go on to it.
+    fn done(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.scroll {
+            if let Some(sel) = self.sel {
+                scroll::start(window, sel, self.scale, cx);
+            }
+            return;
         }
+        self.finish_text(cx);
+        let Some(img) = self.export() else { return };
+        capture::close(cx);
+        capture::deliver(img, self.scale, false, cx);
     }
 
-    fn save_as(&mut self, cx: &mut Context<Self>) {
+    /// Copy and keep it like `done`, then open it in the library's editor.
+    fn edit(&mut self, cx: &mut Context<Self>) {
+        self.finish_text(cx);
+        let Some(img) = self.export() else { return };
+        capture::close(cx);
+        capture::deliver(img, self.scale, true, cx);
+    }
+
+    fn save_as(&mut self, format: capture::Format, cx: &mut Context<Self>) {
         self.finish_text(cx);
         let Some(img) = self.export() else { return };
         // The save panel would open under the overlay.
         capture::close(cx);
-        capture::save_as(img, cx);
+        library::keep(img.clone(), self.scale, false, cx);
+        capture::save_as(img, format, cx);
     }
 
     fn scene(&self) -> Scene {
@@ -324,7 +353,7 @@ impl Overlay {
         if let Some(Drag::Draw(s)) = &self.drag {
             shapes.push(s.clone());
         }
-        Scene { shapes, sel: self.sel, scale: self.scale, base: self.base.clone(), accent: hsla(COLORS[1]) }
+        Scene { shapes, sel: self.sel, scale: self.scale, base: self.base.clone(), accent: white() }
     }
 }
 
@@ -332,49 +361,6 @@ impl Focusable for Overlay {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
-}
-
-/// A tool's glyph and tooltip.
-fn tool_label(tool: Tool) -> (&'static str, &'static str) {
-    match tool {
-        Tool::Rect => ("▢", "Rectangle (R)"),
-        Tool::Ellipse => ("◯", "Ellipse (E)"),
-        Tool::Line => ("╱", "Line (L)"),
-        Tool::Arrow => ("↗", "Arrow (A)"),
-        Tool::Pen => ("✎", "Pen (P)"),
-        Tool::Text => ("T", "Text (T)"),
-        Tool::Marker => ("①", "Numbered marker (N)"),
-        Tool::Mosaic => ("▦", "Mosaic (M)"),
-    }
-}
-
-fn bar() -> Div {
-    div()
-        .absolute()
-        .flex()
-        .items_center()
-        .gap_1()
-        .px_2()
-        .rounded_md()
-        .bg(rgba(0x1e1f22f0))
-        .border_1()
-        .border_color(rgba(0xffffff26))
-        .text_color(rgb(0xe8e8ea))
-        .text_size(px(14.))
-}
-
-fn button(id: impl Into<ElementId>, label: &'static str, selected: bool, enabled: bool) -> Stateful<Div> {
-    let b = div().id(id.into()).flex().items_center().justify_center().h(px(26.)).min_w(px(26.)).px_1().rounded_sm().child(label);
-    let b = if selected { b.bg(hsla(COLORS[1])).text_color(white()) } else { b };
-    if enabled { b.cursor_pointer().hover(|s| s.bg(rgba(0xffffff1f))) } else { b.opacity(0.35) }
-}
-
-fn tip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView {
-    move |window, cx| Tooltip::new(text).build(window, cx)
-}
-
-fn sep() -> Div {
-    div().w(px(1.)).h(px(18.)).mx_1().bg(rgba(0xffffff2e))
 }
 
 impl Render for Overlay {
@@ -395,18 +381,13 @@ impl Render for Overlay {
             .child(img(ImageSource::Render(self.picture.clone())).absolute().top_0().left_0().w(size.width).h(size.height))
             .child(canvas(|_, _, _| {}, move |_, _, window, cx| scene.paint(window, cx)).absolute().top_0().left_0().size_full());
         let Some((lo, hi)) = self.sel else {
-            return root.child(
-                div().absolute().top(px(h / 2. - 20.)).w_full().flex().justify_center().child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgba(0x000000a0))
-                        .text_color(white())
-                        .text_size(px(14.))
-                        .child("Drag to capture a region · Esc to cancel"),
-                ),
-            );
+            return root.child(div().absolute().top(px(h / 2. - 20.)).w_full().flex().justify_center().child(
+                div().px_3().py_2().rounded_md().bg(rgba(0x000000a0)).text_color(white()).text_size(px(14.)).child(if self.scroll {
+                    "Drag over what scrolls, then scroll it · Esc to cancel"
+                } else {
+                    "Drag to capture a region · Esc to cancel"
+                }),
+            ));
         };
         // Size label above the region (inside it at the top of the screen).
         let label_top = if lo.y >= 30. { lo.y - 28. } else { lo.y + 6. };
@@ -447,89 +428,132 @@ impl Overlay {
         };
         let right = (w - hi.x).min(w - BAR_W - 8.).max(8.);
         let stop = |_: &MouseDownEvent, _: &mut Window, cx: &mut App| cx.stop_propagation();
+        if self.scroll {
+            let toolbar = bar()
+                .top(px(bar_y))
+                .right(px((w - hi.x).min(w - SCROLL_BAR_W - 8.).max(8.)))
+                .h(px(BAR_H))
+                .occlude()
+                .on_mouse_down(MouseButton::Left, stop)
+                .child(div().px(px(6.)).text_color(rgb(crate::ui::DIM)).child("Scrolling capture"))
+                .child(sep())
+                .child(icon_button("cancel", IconName::X, false, true).tooltip(tip("Cancel (Esc)")).on_click(|_, _, cx| capture::close(cx)))
+                .child(div().w(px(4.)))
+                .child(
+                    pill("start", "Start", true)
+                        .tooltip(tip("Start, then scroll what is in the region (Enter)"))
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.done(window, cx))),
+                );
+            return vec![toolbar.into_any_element()];
+        }
 
         let mut toolbar = bar().top(px(bar_y)).right(px(right)).h(px(BAR_H)).occlude().on_mouse_down(MouseButton::Left, stop);
         for (i, tool) in Tool::ALL.into_iter().enumerate() {
-            let (glyph, hint) = tool_label(tool);
-            toolbar = toolbar.child(button(("tool", i), glyph, self.tool == Some(tool), true).tooltip(tip(hint)).on_click(cx.listener(
-                move |this, _: &ClickEvent, window, cx| {
+            let (name, hint) = tool_label(tool);
+            toolbar = toolbar.child(icon_button(("tool", i), name, self.tool == Some(tool), true).tooltip(tip(hint)).on_click(
+                cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.commit_text(window, cx);
                     this.tool = if this.tool == Some(tool) { None } else { Some(tool) };
                     cx.notify();
-                },
-            )));
+                }),
+            ));
         }
         toolbar = toolbar
             .child(sep())
-            .child(button("undo", "↶", false, self.doc.can_undo()).tooltip(tip("Undo (⌘Z)")).on_click(cx.listener(
+            .child(icon_button("undo", IconName::Undo2, false, self.doc.can_undo()).tooltip(tip("Undo (⌘Z)")).on_click(cx.listener(
                 |this, _: &ClickEvent, _, cx| {
                     this.doc.undo();
                     cx.notify();
                 },
             )))
-            .child(button("redo", "↷", false, self.doc.can_redo()).tooltip(tip("Redo (⌘⇧Z)")).on_click(cx.listener(
+            .child(icon_button("redo", IconName::Redo2, false, self.doc.can_redo()).tooltip(tip("Redo (⌘⇧Z)")).on_click(cx.listener(
                 |this, _: &ClickEvent, _, cx| {
                     this.doc.redo();
                     cx.notify();
                 },
             )))
             .child(sep())
-            .child(button("cancel", "✕", false, true).tooltip(tip("Cancel (Esc)")).on_click(|_, _, cx| capture::close(cx)))
+            .child(icon_button("cancel", IconName::X, false, true).tooltip(tip("Cancel (Esc)")).on_click(|_, _, cx| capture::close(cx)))
             .child(
-                button("save", "Save…", false, true)
-                    .tooltip(tip("Save as (⌘S)"))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save_as(cx))),
+                icon_button("save", IconName::Download, self.save_menu.is_some(), true)
+                    .tooltip(tip("Save to a file: PNG, JPEG or BMP (⌘S: PNG)"))
+                    .on_click(cx.listener(|this, ev: &ClickEvent, _, cx| {
+                        this.finish_text(cx);
+                        this.save_menu = if this.save_menu.is_some() { None } else { Some(from_point(ev.position())) };
+                        cx.notify();
+                    })),
             )
             .child(
-                button("copy", "Copy", false, true)
-                    .tooltip(tip("Copy only (⌘C)"))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.copy(cx))),
+                icon_button("edit", IconName::SquarePen, false, true)
+                    .tooltip(tip("Copy, and open in the editor (⌘E)"))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.edit(cx))),
             )
+            .child(div().w(px(4.)))
             .child(
-                button("done", "Done", true, true)
-                    .tooltip(tip("Copy and save (Enter)"))
+                pill("copy", "Copy", true)
+                    .tooltip(tip("Copy, and keep in the library (Enter or ⌘C)"))
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.done(window, cx))),
             );
         let mut out = vec![toolbar.into_any_element()];
+
+        if let Some(at) = self.save_menu {
+            const ROW_H: f32 = 26.;
+            const MENU_W: f32 = 150.;
+            let menu_h = ROW_H * capture::Format::ALL.len() as f32 + 8.;
+            // Away from the region: under the bar if it sits below it.
+            let top = if bar_y > lo.y { bar_y + BAR_H + 4. } else { bar_y - 4. - menu_h };
+            let top = top.clamp(0., (h - menu_h).max(0.));
+            let left = (at.x - MENU_W / 2.).clamp(4., (w - MENU_W - 4.).max(4.));
+            let mut menu = bar()
+                .flex_col()
+                .items_stretch()
+                .gap_0()
+                .py_1()
+                .px_1()
+                .top(px(top))
+                .left(px(left))
+                .w(px(MENU_W))
+                .occlude()
+                .on_mouse_down(MouseButton::Left, stop);
+            for (i, format) in capture::Format::ALL.into_iter().enumerate() {
+                menu = menu.child(
+                    div()
+                        .id(("format", i))
+                        .h(px(ROW_H))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(white()).text_color(black()))
+                        .child(format.label())
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.save_menu = None;
+                            this.save_as(format, cx);
+                        })),
+                );
+            }
+            out.push(menu.into_any_element());
+        }
 
         if styled {
             let style_y = if below || bar_y > lo.y { bar_y + BAR_H + 6. } else { bar_y - 6. - STYLE_H };
             let mut style_bar = bar().top(px(style_y)).right(px(right)).h(px(STYLE_H)).occlude().on_mouse_down(MouseButton::Left, stop);
             for size in 0..3u8 {
-                let dot = 4. + 3. * f32::from(size);
-                style_bar = style_bar.child(
-                    div()
-                        .id(("size", usize::from(size)))
-                        .size(px(22.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .when(self.style.size == size, |d| d.bg(rgba(0xffffff2e)))
-                        .child(div().size(px(dot)).rounded_full().bg(white()))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.style.size = size;
-                            cx.notify();
-                        })),
-                );
+                style_bar =
+                    style_bar.child(size_dot(size, self.style.size == size).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.style.size = size;
+                        cx.notify();
+                    })));
             }
             style_bar = style_bar.child(sep());
             for (i, color) in COLORS.into_iter().enumerate() {
-                style_bar = style_bar.child(
-                    div()
-                        .id(("color", i))
-                        .size(px(18.))
-                        .rounded_full()
-                        .cursor_pointer()
-                        .bg(hsla(color))
-                        .border_2()
-                        .border_color(if self.style.color == color { white() } else { rgba(0xffffff33).into() })
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.style.color = color;
-                            cx.notify();
-                        })),
-                );
+                style_bar = style_bar.child(swatch(i, color, self.style.color == color).on_click(cx.listener(
+                    move |this, _: &ClickEvent, _, cx| {
+                        this.style.color = color;
+                        cx.notify();
+                    },
+                )));
             }
             out.push(style_bar.into_any_element());
         }

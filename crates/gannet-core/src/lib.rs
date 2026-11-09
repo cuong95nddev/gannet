@@ -3,7 +3,12 @@
 //! here, so all of it is testable without a window.
 
 pub mod capture;
+pub mod edits;
+pub mod folders;
 pub mod model;
 pub mod raster;
 pub mod settings;
+pub mod stitch;
 pub mod store;
+pub mod trash;
+pub mod vault;

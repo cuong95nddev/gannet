@@ -254,16 +254,18 @@ pub enum Action {
     Region,
     Window,
     Screen,
+    Scroll,
 }
 
 impl Action {
-    pub const ALL: [Action; 3] = [Action::Region, Action::Window, Action::Screen];
+    pub const ALL: [Action; 4] = [Action::Region, Action::Window, Action::Screen, Action::Scroll];
 
     pub fn title(self) -> &'static str {
         match self {
             Action::Region => "Capture Region",
             Action::Window => "Capture Window",
             Action::Screen => "Capture Full Screen",
+            Action::Scroll => "Capture Scrolling Region",
         }
     }
 
@@ -273,6 +275,7 @@ impl Action {
             Action::Region => "Digit4",
             Action::Window => "Digit5",
             Action::Screen => "Digit3",
+            Action::Scroll => "Digit6",
         };
         Shortcut { mods: Mods::CONTROL_SHIFT, key }
     }
@@ -287,6 +290,9 @@ fn window_default() -> Option<Shortcut> {
 fn screen_default() -> Option<Shortcut> {
     Some(Action::Screen.default_shortcut())
 }
+fn scroll_default() -> Option<Shortcut> {
+    Some(Action::Scroll.default_shortcut())
+}
 
 /// Each capture's shortcut; `None` (JSON `null`) is none at all, and a
 /// missing entry is the default.
@@ -298,11 +304,13 @@ pub struct Shortcuts {
     pub window: Option<Shortcut>,
     #[serde(default = "screen_default")]
     pub screen: Option<Shortcut>,
+    #[serde(default = "scroll_default")]
+    pub scroll: Option<Shortcut>,
 }
 
 impl Default for Shortcuts {
     fn default() -> Self {
-        Shortcuts { region: region_default(), window: window_default(), screen: screen_default() }
+        Shortcuts { region: region_default(), window: window_default(), screen: screen_default(), scroll: scroll_default() }
     }
 }
 
@@ -312,6 +320,7 @@ impl Shortcuts {
             Action::Region => self.region,
             Action::Window => self.window,
             Action::Screen => self.screen,
+            Action::Scroll => self.scroll,
         }
     }
 
@@ -320,6 +329,7 @@ impl Shortcuts {
             Action::Region => self.region = s,
             Action::Window => self.window = s,
             Action::Screen => self.screen = s,
+            Action::Scroll => self.scroll = s,
         }
     }
 
@@ -329,13 +339,70 @@ impl Shortcuts {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub shortcuts: Shortcuts,
     /// Where captures are saved; `None` is `~/Pictures/Gannet`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub save_dir: Option<PathBuf>,
+    /// The capture toolbar is on.
+    #[serde(default = "yes")]
+    pub toolbar: bool,
+    /// Where the capture toolbar is, when on.
+    #[serde(default)]
+    pub toolbar_place: ToolbarPlace,
+    /// Captures older than this many days leave the library; `None` keeps
+    /// them until deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_days: Option<u32>,
+    /// A capture opens in the library's editor once taken.
+    #[serde(default)]
+    pub open_editor: bool,
+    /// The editor shows its list of layers.
+    #[serde(default = "yes")]
+    pub layers: bool,
+    /// Captures in the trash longer than this many days are deleted for
+    /// good; `None` keeps them until the trash is emptied.
+    #[serde(default = "trash_default")]
+    pub trash_days: Option<u32>,
+}
+
+/// Where the capture toolbar is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolbarPlace {
+    /// Floating above every window, where it was dragged.
+    #[default]
+    Floating,
+    /// Under the menu bar icon, shown by clicking the icon.
+    MenuBar,
+}
+
+/// The choices for how long captures are kept, in days.
+pub const KEEP_CHOICES: [Option<u32>; 5] = [None, Some(90), Some(30), Some(7), Some(1)];
+
+fn yes() -> bool {
+    true
+}
+
+fn trash_default() -> Option<u32> {
+    Some(30)
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            shortcuts: Shortcuts::default(),
+            save_dir: None,
+            toolbar: true,
+            toolbar_place: ToolbarPlace::Floating,
+            keep_days: None,
+            open_editor: false,
+            layers: true,
+            trash_days: trash_default(),
+        }
+    }
 }
 
 impl Settings {
@@ -440,7 +507,19 @@ mod tests {
         assert_eq!(s.shortcuts.window, None);
         assert_eq!(s.shortcuts.screen, Some(sc("alt+F3")));
         assert_eq!(s.save_dir, None);
+        assert!(s.toolbar, "the toolbar is on unless turned off");
+        assert_eq!(s.keep_days, None, "captures are kept until deleted");
+        assert!(!s.open_editor);
+        assert!(!serde_json::from_str::<Settings>(r#"{"toolbar":false}"#).unwrap().toolbar);
         assert_eq!(serde_json::from_str::<Settings>("{}").unwrap(), Settings::default());
+    }
+
+    #[test]
+    fn toolbar_place_defaults_to_floating() {
+        let s: Settings = serde_json::from_str(r#"{"toolbar":true}"#).unwrap();
+        assert_eq!(s.toolbar_place, ToolbarPlace::Floating);
+        let s: Settings = serde_json::from_str(r#"{"toolbar_place":"menu_bar"}"#).unwrap();
+        assert_eq!(s.toolbar_place, ToolbarPlace::MenuBar);
     }
 
     #[test]

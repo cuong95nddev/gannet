@@ -7,8 +7,11 @@ use std::sync::OnceLock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem};
-use objc2_foundation::{NSString, ns_string};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn, NSEventMask, NSEventModifierFlags,
+    NSEventType, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
+};
+use objc2_foundation::{NSRect, NSString, ns_string};
 
 use gannet_core::settings::{Action, Shortcuts};
 
@@ -46,19 +49,45 @@ define_class!(
             send(Command::Capture(Mode::Screen));
         }
 
+        #[unsafe(method(scroll:))]
+        fn scroll(&self, _sender: &NSMenuItem) {
+            send(Command::Capture(Mode::Scroll));
+        }
+
+        #[unsafe(method(toolbar:))]
+        fn toolbar(&self, _sender: &NSMenuItem) {
+            send(Command::ToggleToolbar);
+        }
+
         #[unsafe(method(settings:))]
         fn settings(&self, _sender: &NSMenuItem) {
             send(Command::OpenSettings);
         }
 
-        #[unsafe(method(openCaptures:))]
-        fn open_captures(&self, _sender: &NSMenuItem) {
-            send(Command::OpenCaptures);
+        #[unsafe(method(openLibrary:))]
+        fn open_library(&self, _sender: &NSMenuItem) {
+            send(Command::OpenLibrary);
         }
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: &NSMenuItem) {
             send(Command::Quit);
+        }
+
+        /// The icon clicked while the toolbar lives under it: a click
+        /// shows the toolbar, a right-click (or ⌃-click) the menu.
+        #[unsafe(method(iconClicked:))]
+        fn icon_clicked(&self, _sender: &AnyObject) {
+            let mtm = MainThreadMarker::from(self);
+            let event = NSApplication::sharedApplication(mtm).currentEvent();
+            let menu = event.is_some_and(|e| {
+                e.r#type() == NSEventType::RightMouseUp || e.modifierFlags().contains(NSEventModifierFlags::Control)
+            });
+            if menu {
+                show_menu();
+            } else {
+                send(Command::ToggleAttachedToolbar);
+            }
         }
     }
 );
@@ -72,10 +101,13 @@ impl Target {
 }
 
 struct Ui {
-    _item: Retained<NSStatusItem>,
-    _target: Retained<Target>,
+    item: Retained<NSStatusItem>,
+    menu: Retained<NSMenu>,
+    target: Retained<Target>,
     /// The capture items, retitled when their shortcuts change.
     captures: Vec<(Action, Retained<NSMenuItem>)>,
+    /// "Show Capture Toolbar", checked while it is on.
+    toolbar: Retained<NSMenuItem>,
 }
 
 thread_local! {
@@ -98,7 +130,12 @@ pub fn install(tx: flume::Sender<Command>) {
     }
     let target = Target::new(mtm);
     let menu = NSMenu::new(mtm);
-    let entries: [(Action, Sel); 3] = [(Action::Region, sel!(region:)), (Action::Window, sel!(window:)), (Action::Screen, sel!(screen:))];
+    let entries: [(Action, Sel); 4] = [
+        (Action::Region, sel!(region:)),
+        (Action::Window, sel!(window:)),
+        (Action::Screen, sel!(screen:)),
+        (Action::Scroll, sel!(scroll:)),
+    ];
     let mut captures = Vec::new();
     for (a, action) in entries {
         let item = menu_item(a.title(), action, &target, mtm);
@@ -106,18 +143,43 @@ pub fn install(tx: flume::Sender<Command>) {
         captures.push((a, item));
     }
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    menu.addItem(&menu_item("Open Captures Folder", sel!(openCaptures:), &target, mtm));
+    let toolbar = menu_item("Show Capture Toolbar", sel!(toolbar:), &target, mtm);
+    menu.addItem(&toolbar);
+    menu.addItem(&menu_item("Open Library", sel!(openLibrary:), &target, mtm));
     menu.addItem(&menu_item("Settings…", sel!(settings:), &target, mtm));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&menu_item("Quit Gannet", sel!(quit:), &target, mtm));
     item.setMenu(Some(&menu));
-    UI.with(|u| *u.borrow_mut() = Some(Ui { _item: item, _target: target, captures }));
+    UI.with(|u| *u.borrow_mut() = Some(Ui { item, menu, target, captures, toolbar }));
 }
 
-/// Show `shortcuts` next to their captures. Main thread only.
-pub fn refresh(shortcuts: &Shortcuts) {
+/// Show `shortcuts` next to their captures, and whether the toolbar is
+/// on; with the toolbar `attached` under the icon, a click on the icon
+/// shows the toolbar instead of the menu. Main thread only.
+pub fn refresh(shortcuts: &Shortcuts, toolbar: bool, attached: bool) {
     UI.with(|u| {
         let Some(ui) = &*u.borrow() else { return };
+        ui.toolbar.setState(if toolbar { NSControlStateValueOn } else { NSControlStateValueOff });
+        let mtm = MainThreadMarker::new().expect("main thread");
+        if let Some(button) = ui.item.button(mtm) {
+            if attached {
+                ui.item.setMenu(None);
+                // SAFETY: `iconClicked:` is a method of `Target`, which lives
+                // as long as the UI.
+                unsafe {
+                    button.setTarget(Some(&ui.target as &AnyObject));
+                    button.setAction(Some(sel!(iconClicked:)));
+                }
+                button.sendActionOn(NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp);
+            } else {
+                // SAFETY: clearing the action set above.
+                unsafe {
+                    button.setTarget(None);
+                    button.setAction(None);
+                }
+                ui.item.setMenu(Some(&ui.menu));
+            }
+        }
         for (a, item) in &ui.captures {
             let title = match shortcuts.get(*a) {
                 Some(s) => format!("{}\t{}", a.title(), s.label()),
@@ -126,6 +188,38 @@ pub fn refresh(shortcuts: &Shortcuts) {
             item.setTitle(&NSString::from_str(&title));
         }
     });
+}
+
+/// Drop the menu down from the icon, as a click does without the toolbar.
+fn show_menu() {
+    UI.with(|u| {
+        let Some(ui) = &*u.borrow() else { return };
+        let mtm = MainThreadMarker::new().expect("main thread");
+        let Some(button) = ui.item.button(mtm) else { return };
+        // The menu, set for this click only (and the icon's own action
+        // off meanwhile, so the click can't come back here).
+        // SAFETY: setting the action off and back to `Target`'s method,
+        // and the button's own click, with no sender.
+        unsafe {
+            button.setAction(None);
+            ui.item.setMenu(Some(&ui.menu));
+            button.performClick(None);
+            ui.item.setMenu(None);
+            button.setAction(Some(sel!(iconClicked:)));
+        }
+    });
+}
+
+/// The icon's frame on screen (AppKit's coordinates, from the bottom left
+/// of the main display). Main thread only.
+pub fn icon_frame() -> Option<NSRect> {
+    UI.with(|u| {
+        let ui = u.borrow();
+        let ui = ui.as_ref()?;
+        let mtm = MainThreadMarker::new()?;
+        let button = ui.item.button(mtm)?;
+        Some(button.window()?.frame())
+    })
 }
 
 fn menu_item(title: &str, action: Sel, target: &Target, mtm: MainThreadMarker) -> Retained<NSMenuItem> {

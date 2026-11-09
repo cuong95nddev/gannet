@@ -53,6 +53,14 @@ pub fn grab_display(id: u32) -> Result<RgbaImage, String> {
     run(&["-x", "-R", &rect])?.ok_or_else(|| "screencapture wrote nothing".to_owned())
 }
 
+/// The rectangle at `x, y` (points, global: from the top left of the main
+/// display), `w` by `h` points, at the pixel resolution of its display.
+/// Takes some 40 ms.
+pub fn grab_rect(x: f64, y: f64, w: f64, h: f64) -> Result<RgbaImage, String> {
+    let rect = format!("{},{},{},{}", x.round() as i64, y.round() as i64, w.round() as i64, h.round() as i64);
+    run(&["-x", "-R", &rect])?.ok_or_else(|| "screencapture wrote nothing".to_owned())
+}
+
 /// A window the user clicks, by `screencapture`'s own picker; `None` when
 /// they cancel (Esc). Blocks until then.
 pub fn pick_window(shadow: bool) -> Result<Option<RgbaImage>, String> {

@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont, point};
 use image::RgbaImage;
-use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform};
+use tiny_skia::{FillRule, FilterQuality, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, Stroke, Transform};
 
 use crate::model::{self, Doc, MOSAIC_BLOCK, P, Rgba, Shape};
 
@@ -32,34 +32,70 @@ pub fn font() -> Option<&'static FontVec> {
 
 const FONT_PATHS: [&str; 2] = ["/System/Library/Fonts/SFNS.ttf", "/System/Library/Fonts/Helvetica.ttc"];
 
-/// `crop` of `base` with `doc`'s shapes drawn on it, oldest first.
+/// `crop` of `base` with `doc`'s shapes drawn on it, oldest first; hidden
+/// ones are left out.
 pub fn render(base: &RgbaImage, crop: Crop, doc: &Doc, font: Option<&FontVec>) -> RgbaImage {
     let crop = clamp(crop, base.width(), base.height());
-    let mut pm = Pixmap::new(crop.w.max(1), crop.h.max(1)).expect("non-empty pixmap");
-    {
-        // Screenshots are opaque, so the RGBA bytes are already premultiplied.
-        let data = pm.data_mut();
-        for y in 0..crop.h {
-            for x in 0..crop.w {
-                let px = base.get_pixel(crop.x + x, crop.y + y).0;
-                let a = u16::from(px[3]);
-                let i = ((y * crop.w + x) * 4) as usize;
-                for c in 0..3 {
-                    data[i + c] = (u16::from(px[c]) * a / 255) as u8;
-                }
-                data[i + 3] = px[3];
-            }
-        }
-    }
+    let part = image::imageops::crop_imm(base, crop.x, crop.y, crop.w.max(1), crop.h.max(1)).to_image();
+    let mut pm = to_pixmap(&part);
     let off = model::p(crop.x as f32, crop.y as f32);
-    for shape in &doc.shapes {
+    for shape in doc.visible() {
         draw(&mut pm, shape, off, doc, font);
     }
-    let mut out = RgbaImage::new(crop.w.max(1), crop.h.max(1));
-    for (i, px) in pm.pixels().iter().enumerate() {
+    from_pixmap(&pm)
+}
+
+/// The layers of `doc` drawn on a blank `w` × `h` canvas, the bottom one
+/// first; `image` finds the pixels of an image layer by its number.
+pub fn compose<'a>(w: u32, h: u32, doc: &Doc, image: impl Fn(u32) -> Option<&'a RgbaImage>, font: Option<&FontVec>) -> RgbaImage {
+    let mut pm = Pixmap::new(w.max(1), h.max(1)).expect("non-empty pixmap");
+    let [r, g, b, a] = PAPER;
+    pm.fill(tiny_skia::Color::from_rgba8(r, g, b, a));
+    for shape in doc.visible() {
+        match shape {
+            Shape::Image { image: n, a, b } => {
+                if let Some(img) = image(*n) {
+                    draw_image(&mut pm, img, *a, *b);
+                }
+            },
+            _ => draw(&mut pm, shape, P::default(), doc, font),
+        }
+    }
+    from_pixmap(&pm)
+}
+
+/// `img` scaled into the rectangle `a`–`b`.
+fn draw_image(pm: &mut Pixmap, img: &RgbaImage, a: P, b: P) {
+    let (lo, hi) = model::norm(a, b);
+    let (iw, ih) = (img.width() as f32, img.height() as f32);
+    let (sx, sy) = ((hi.x - lo.x) / iw, (hi.y - lo.y) / ih);
+    if sx <= 0. || sy <= 0. {
+        return;
+    }
+    // At its own size on whole pixels, copied as it is.
+    let exact = sx == 1. && sy == 1. && lo.x.fract() == 0. && lo.y.fract() == 0.;
+    let paint = PixmapPaint { quality: if exact { FilterQuality::Nearest } else { FilterQuality::Bicubic }, ..PixmapPaint::default() };
+    pm.draw_pixmap(0, 0, to_pixmap(img).as_ref(), &paint, Transform::from_row(sx, 0., 0., sy, lo.x, lo.y), None);
+}
+
+/// `img` as a pixmap, its colours premultiplied.
+fn to_pixmap(img: &RgbaImage) -> Pixmap {
+    let mut pm = Pixmap::new(img.width().max(1), img.height().max(1)).expect("non-empty pixmap");
+    for (dst, src) in pm.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(img.as_raw().as_chunks::<4>().0) {
+        let a = u16::from(src[3]);
+        for c in 0..3 {
+            dst[c] = ((u16::from(src[c]) * a + 127) / 255) as u8;
+        }
+        dst[3] = src[3];
+    }
+    pm
+}
+
+fn from_pixmap(pm: &Pixmap) -> RgbaImage {
+    let mut out = RgbaImage::new(pm.width(), pm.height());
+    for (dst, px) in out.as_chunks_mut::<4>().0.iter_mut().zip(pm.pixels()) {
         let c = px.demultiply();
-        let buf: &mut [u8] = &mut out;
-        buf[i * 4..i * 4 + 4].copy_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+        *dst = [c.red(), c.green(), c.blue(), c.alpha()];
     }
     out
 }
@@ -71,33 +107,6 @@ pub fn flatten(base: &RgbaImage, doc: &Doc, font: Option<&FontVec>) -> RgbaImage
 
 /// The colour new canvas is filled with.
 pub const PAPER: Rgba = [0xFF; 4];
-
-/// A blank canvas.
-pub fn blank(w: u32, h: u32) -> RgbaImage {
-    RgbaImage::from_pixel(w.max(1), h.max(1), image::Rgba(PAPER))
-}
-
-/// `img` scaled to `w`×`h` and laid over `canvas` with its top left at
-/// (`x`, `y`). The canvas grows, in blank paper, to hold all of it; the
-/// result is the new canvas and where the old one's top left went.
-pub fn place(canvas: &RgbaImage, img: &RgbaImage, x: i64, y: i64, w: u32, h: u32) -> (RgbaImage, (u32, u32)) {
-    let (w, h) = (w.max(1), h.max(1));
-    let scaled =
-        if img.dimensions() == (w, h) { img.clone() } else { image::imageops::resize(img, w, h, image::imageops::FilterType::Triangle) };
-    let (cw, ch) = (i64::from(canvas.width()), i64::from(canvas.height()));
-    let (left, top) = (x.min(0), y.min(0));
-    let (right, bottom) = ((x + i64::from(w)).max(cw), (y + i64::from(h)).max(ch));
-    let shift = ((-left) as u32, (-top) as u32);
-    let mut out = if (left, top, right, bottom) == (0, 0, cw, ch) {
-        canvas.clone()
-    } else {
-        let mut grown = blank((right - left) as u32, (bottom - top) as u32);
-        image::imageops::replace(&mut grown, canvas, i64::from(shift.0), i64::from(shift.1));
-        grown
-    };
-    image::imageops::overlay(&mut out, &scaled, x - left, y - top);
-    (out, shift)
-}
 
 /// An image read from encoded bytes (a clipboard's).
 pub fn decode(bytes: &[u8]) -> Option<RgbaImage> {
@@ -192,6 +201,14 @@ fn draw(pm: &mut Pixmap, shape: &Shape, off: P, doc: &Doc, font: Option<&FontVec
             }
         },
         Shape::Mosaic { a, b } => mosaic(pm, *a - off, *b - off, doc.px(MOSAIC_BLOCK)),
+        Shape::Erase { a, b } => {
+            let (lo, hi) = model::norm(*a - off, *b - off);
+            if let Some(r) = tiny_skia::Rect::from_ltrb(lo.x, lo.y, hi.x, hi.y) {
+                pm.fill_rect(r, &paint(PAPER), id, None);
+            }
+        },
+        // Laid down by `compose`, which has the pixels.
+        Shape::Image { .. } => {},
     }
 }
 
@@ -234,16 +251,92 @@ fn mosaic(pm: &mut Pixmap, a: P, b: P, block: f32) {
     }
 }
 
+/// The box `shape` covers, in image pixels, its stroke included; `scale`
+/// is pixels per point. Without a font, text is guessed at.
+pub fn bounds(shape: &Shape, scale: f32, font: Option<&FontVec>) -> (P, P) {
+    let pad = |(lo, hi): (P, P), by: f32| (lo - model::p(by, by), hi + model::p(by, by));
+    match shape {
+        Shape::Rect { a, b, style } | Shape::Ellipse { a, b, style } | Shape::Line { a, b, style } => {
+            pad(model::norm(*a, *b), style.stroke() * scale / 2.)
+        },
+        Shape::Arrow { a, b, style } => {
+            let (_, [tip, l, r]) = model::arrow(*a, *b, style.stroke() * scale);
+            let pts = [*a, tip, l, r];
+            pad(span(&pts), style.stroke() * scale / 2.)
+        },
+        Shape::Pen { points, style } => pad(span(points), style.stroke() * scale / 2.),
+        Shape::Text { at, text, style } => {
+            let size = style.font() * scale;
+            let lines = text.split('\n').count().max(1) as f32;
+            let (w, h) = match font {
+                Some(font) => {
+                    let sf = font.as_scaled(em(font, size));
+                    let w = text.split('\n').map(|l| text_size(font, l, size).0).fold(0., f32::max);
+                    (w, (lines - 1.) * (sf.height() + sf.line_gap()) + sf.ascent() - sf.descent())
+                },
+                None => (text.split('\n').map(|l| l.chars().count()).max().unwrap_or(0) as f32 * size * 0.55, lines * size * 1.2),
+            };
+            (*at, *at + model::p(w.max(size * 0.3), h))
+        },
+        Shape::Marker { at, style, .. } => {
+            let r = style.marker_radius() * scale;
+            (*at - model::p(r, r), *at + model::p(r, r))
+        },
+        Shape::Mosaic { a, b } | Shape::Image { a, b, .. } | Shape::Erase { a, b } => model::norm(*a, *b),
+    }
+}
+
+/// The box around `points`.
+fn span(points: &[P]) -> (P, P) {
+    let first = points.first().copied().unwrap_or_default();
+    points.iter().fold((first, first), |(lo, hi), q| (model::p(lo.x.min(q.x), lo.y.min(q.y)), model::p(hi.x.max(q.x), hi.y.max(q.y))))
+}
+
+/// Whether `q` is on `shape`, or within `reach` pixels of it. A rectangle
+/// or an ellipse is held by its outline, so what is under it can be too.
+pub fn hits(shape: &Shape, q: P, reach: f32, scale: f32, font: Option<&FontVec>) -> bool {
+    let inside = |(lo, hi): (P, P)| q.x >= lo.x - reach && q.x <= hi.x + reach && q.y >= lo.y - reach && q.y <= hi.y + reach;
+    let near = |d: f32, style: &model::Style| d <= reach + style.stroke() * scale / 2.;
+    match shape {
+        Shape::Rect { a, b, style } => {
+            let (lo, hi) = model::norm(*a, *b);
+            near(model::to_polyline(q, &[lo, model::p(hi.x, lo.y), hi, model::p(lo.x, hi.y)], true), style)
+        },
+        Shape::Ellipse { a, b, style } => near(model::to_polyline(q, &model::ellipse(*a, *b, 64), true), style),
+        Shape::Line { a, b, style } => near(model::to_segment(q, *a, *b), style),
+        // The head is wider than the line.
+        Shape::Arrow { a, b, style } => model::to_segment(q, *a, *b) <= reach + style.stroke() * scale * 2.,
+        Shape::Pen { points, style } => near(model::to_polyline(q, points, false), style),
+        Shape::Text { .. } | Shape::Marker { .. } | Shape::Mosaic { .. } | Shape::Image { .. } | Shape::Erase { .. } => {
+            inside(bounds(shape, scale, font))
+        },
+    }
+}
+
+/// The topmost shown layer of `doc` at `q`, within `reach` pixels.
+pub fn layer_at(doc: &Doc, q: P, reach: f32, font: Option<&FontVec>) -> Option<usize> {
+    (0..doc.shapes.len()).rev().find(|&i| !doc.is_hidden(i) && hits(&doc.shapes[i], q, reach, doc.scale, font))
+}
+
+/// The scale that draws `font` `size` pixels to the em, as the screen
+/// does; ab_glyph's own scale is the height from descent to ascent.
+fn em(font: &FontVec, size: f32) -> PxScale {
+    match font.units_per_em() {
+        Some(upem) if upem > 0. => PxScale::from(size * font.height_unscaled() / upem),
+        _ => PxScale::from(size),
+    }
+}
+
 /// The size of `text` (one line) at `size` pixels: (advance, ascent - descent).
 pub fn text_size(font: &FontVec, text: &str, size: f32) -> (f32, f32) {
-    let sf = font.as_scaled(PxScale::from(size));
+    let sf = font.as_scaled(em(font, size));
     let w = text.chars().map(|c| sf.h_advance(font.glyph_id(c))).sum();
     (w, sf.ascent() - sf.descent())
 }
 
 /// Draw `text` with its first line's top left at `at`.
 fn draw_text(pm: &mut Pixmap, font: &FontVec, text: &str, at: P, size: f32, color: Rgba) {
-    let scale = PxScale::from(size);
+    let scale = em(font, size);
     let sf = font.as_scaled(scale);
     let line_h = sf.height() + sf.line_gap();
     let (w, h) = (pm.width() as i32, pm.height() as i32);
@@ -340,32 +433,29 @@ mod tests {
     }
 
     #[test]
-    fn place_lays_an_image_over_the_canvas() {
-        let canvas = gray(50, 40);
-        let red = RgbaImage::from_pixel(10, 10, image::Rgba(COLORS[0]));
-        let (out, shift) = place(&canvas, &red, 5, 5, 10, 10);
-        assert_eq!((out.dimensions(), shift), ((50, 40), (0, 0)));
-        assert_eq!(out.get_pixel(5, 5).0, COLORS[0]);
-        assert_eq!(out.get_pixel(15, 15).0, [100, 100, 100, 255]);
+    fn hidden_layers_are_not_drawn() {
+        let mut doc = Doc::new(1.);
+        doc.push(Shape::Rect { a: p(20., 20.), b: p(80., 80.), style: Style { color: COLORS[0], size: 1 } });
+        doc.hide(0, true);
+        let out = flatten(&gray(100, 100), &doc, None);
+        assert_eq!(out.get_pixel(20, 50).0, [100, 100, 100, 255]);
     }
 
     #[test]
-    fn place_scales_the_image() {
-        let red = RgbaImage::from_pixel(10, 10, image::Rgba(COLORS[0]));
-        let (out, _) = place(&gray(50, 40), &red, 0, 0, 20, 30);
-        assert_eq!(out.get_pixel(19, 29).0, COLORS[0]);
-        assert_eq!(out.get_pixel(20, 29).0, [100, 100, 100, 255]);
-    }
-
-    #[test]
-    fn place_grows_the_canvas_to_hold_the_image() {
-        let red = RgbaImage::from_pixel(10, 10, image::Rgba(COLORS[0]));
-        let (out, shift) = place(&gray(50, 40), &red, -5, 35, 10, 10);
-        assert_eq!(out.dimensions(), (55, 45));
-        assert_eq!(shift, (5, 0));
-        assert_eq!(out.get_pixel(0, 35).0, COLORS[0]);
-        assert_eq!(out.get_pixel(5, 0).0, [100, 100, 100, 255], "the old canvas moved right");
-        assert_eq!(out.get_pixel(54, 44).0, PAPER, "new room is blank");
+    fn layers_are_found_by_their_outline_or_box() {
+        let style = Style { color: COLORS[0], size: 0 };
+        let mut doc = Doc::new(1.);
+        doc.push(Shape::Rect { a: p(10., 10.), b: p(90., 90.), style });
+        doc.push(Shape::Marker { at: p(50., 50.), n: 1, style });
+        doc.push(Shape::Line { a: p(0., 95.), b: p(100., 95.), style });
+        assert_eq!(layer_at(&doc, p(50., 50.), 2., None), Some(1), "the marker, in the rectangle");
+        assert_eq!(layer_at(&doc, p(30., 30.), 2., None), None, "inside the rectangle is free");
+        assert_eq!(layer_at(&doc, p(11., 40.), 2., None), Some(0));
+        assert_eq!(layer_at(&doc, p(40., 93.), 2., None), Some(2));
+        doc.hide(1, true);
+        assert_eq!(layer_at(&doc, p(50., 50.), 2., None), None, "hidden layers aren't found");
+        let (lo, hi) = bounds(&doc.shapes[0], 1., None);
+        assert_eq!((lo, hi), (p(9., 10. - 1.), p(91., 91.)));
     }
 
     #[test]

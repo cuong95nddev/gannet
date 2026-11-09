@@ -26,6 +26,7 @@ pub fn mode(a: Action) -> Mode {
         Action::Region => Mode::Region,
         Action::Window => Mode::Window,
         Action::Screen => Mode::Screen,
+        Action::Scroll => Mode::Scroll,
     }
 }
 
