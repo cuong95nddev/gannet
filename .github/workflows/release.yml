@@ -41,16 +41,28 @@ jobs:
           security create-keychain -p "$KC_PASS" "$KC"
           security set-keychain-settings -lut 21600 "$KC"
           security unlock-keychain -p "$KC_PASS" "$KC"
-          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          # Each failure names the secret to fix: the log needs a sign-in to
+          # read, an annotation doesn't.
+          fail() { echo "::error::$1"; exit 1; }
+          printf '%s' "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12" 2>/dev/null ||
+            fail "MACOS_CERT_P12 isn't base64 (make it with: base64 -i cert.p12 | pbcopy)"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$CERT_PASSWORD" -T /usr/bin/codesign ||
+            fail "couldn't import MACOS_CERT_P12: MACOS_CERT_PASSWORD is wrong, or it isn't a .p12 with the private key"
           rm "$RUNNER_TEMP/cert.p12"
           security set-key-partition-list -S apple-tool:,apple: -k "$KC_PASS" "$KC" >/dev/null
           security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          ids=$(security find-identity -v -p codesigning "$KC")
+          printf '%s\n' "$ids" | grep -qF "\"$SIGN_ID\"" ||
+            fail "MACOS_SIGN_ID isn't an identity in MACOS_CERT_P12, which has: $(printf '%s' "$ids" | sed -n 's/.*"\(.*\)".*/\1/p' | paste -sd ';' -)"
           echo "GANNET_SIGN_ID=$SIGN_ID" >> "$GITHUB_ENV"
           if [ -n "$NOTARY_KEY" ]; then
-            echo "$NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+            printf '%s' "$NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8" 2>/dev/null ||
+              fail "NOTARY_KEY isn't base64 (make it with: base64 -i AuthKey_XXXX.p8 | pbcopy)"
+            grep -q "BEGIN PRIVATE KEY" "$RUNNER_TEMP/notary.p8" ||
+              fail "NOTARY_KEY isn't a .p8 key once decoded"
             xcrun notarytool store-credentials gannet-notary --keychain "$KC" \
-              --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER"
+              --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" ||
+              fail "Apple refused the notary key: check NOTARY_KEY_ID and NOTARY_ISSUER match NOTARY_KEY"
             rm "$RUNNER_TEMP/notary.p8"
             echo "GANNET_NOTARY_PROFILE=gannet-notary" >> "$GITHUB_ENV"
             echo "GANNET_NOTARY_KEYCHAIN=$KC" >> "$GITHUB_ENV"
