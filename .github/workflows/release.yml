@@ -60,9 +60,13 @@ jobs:
               fail "NOTARY_KEY isn't base64 (make it with: base64 -i AuthKey_XXXX.p8 | pbcopy)"
             grep -q "BEGIN PRIVATE KEY" "$RUNNER_TEMP/notary.p8" ||
               fail "NOTARY_KEY isn't a .p8 key once decoded"
+            # Pasted secrets often carry a stray newline or space.
+            key_id=$(printf '%s' "$NOTARY_KEY_ID" | tr -d '[:space:]')
+            issuer=$(printf '%s' "$NOTARY_ISSUER" | tr -d '[:space:]')
+            # An individual API key has no issuer; a team key needs one.
             xcrun notarytool store-credentials gannet-notary --keychain "$KC" \
-              --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" ||
-              fail "Apple refused the notary key: check NOTARY_KEY_ID and NOTARY_ISSUER match NOTARY_KEY"
+              --key "$RUNNER_TEMP/notary.p8" --key-id "$key_id" ${issuer:+--issuer "$issuer"} ||
+              fail "Apple refused the notary key (NOTARY_KEY_ID is ${#key_id} characters, NOTARY_ISSUER ${#issuer}; a team key's ID is 10 and its issuer 36, an individual key has no issuer)"
             rm "$RUNNER_TEMP/notary.p8"
             echo "GANNET_NOTARY_PROFILE=gannet-notary" >> "$GITHUB_ENV"
             echo "GANNET_NOTARY_KEYCHAIN=$KC" >> "$GITHUB_ENV"
