@@ -26,6 +26,8 @@ feature set, on macOS. ✅ done, the rest in rough order.
   colours and sizes, undo/redo
 - A separate editor window for a capture after it is taken (Tern's
   `shot/editor.rs` is the starting point)
+- Redact: a solid box for secrets. Mosaic only averages 8 px blocks, which
+  depixelation tools can sometimes read back, so it is cosmetic, not redaction
 - Highlighter, blur (not only mosaic), spotlight (dim all but an area)
 - Crop, resize, rotate, flip
 - Border, shadow, torn edge, rounded corners, caption and watermark
