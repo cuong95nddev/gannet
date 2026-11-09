@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gannet — screen capture for the macOS menu bar</title>
+<meta name="description" content="Gannet is a fast, native screen capture tool for macOS. Press a shortcut, pick a region, a window or the whole screen, mark it up, done.">
+<meta name="theme-color" content="#06101f">
+<link rel="canonical" href="https://cuong95nddev.github.io/gannet/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Gannet">
+<meta property="og:url" content="https://cuong95nddev.github.io/gannet/">
+<meta property="og:title" content="Gannet — screen capture for the macOS menu bar">
+<meta property="og:description" content="Press a shortcut, pick what you want, mark it up, done.">
+<meta property="og:image" content="https://cuong95nddev.github.io/gannet/assets/icon.png">
+<meta property="og:image:width" content="256">
+<meta property="og:image:height" content="256">
+<meta name="twitter:card" content="summary">
+<script>
+  // A theme the visitor picked before; without one the system's is used.
+  try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch {}
+</script>
+<link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+<link rel="icon" href="assets/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #06101f;
+    --raise: #0d1a2e;
+    --card: #0f1f37;
+    --line: #1c2c45;
+    --ink: #e9eef6;
+    --dim: #8b9ab0;
+    --faint: #5b6b82;
+    --accent: #4fb3ff;
+    --accent-ink: #04121f;
+    --sun: #ffd166;
+    --h1-top: #ffffff;
+    --h1-bottom: #8fb7e6;
+    --glow: rgba(79,179,255,.22);
+    --shadow: 0 30px 80px rgba(0,0,0,.55);
+    color-scheme: dark;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f6f9fd; --raise: #ffffff; --card: #ffffff; --line: #dde5ef;
+      --ink: #0d1726; --dim: #556479; --faint: #8a97a8;
+      --accent: #0b6fd8; --accent-ink: #ffffff; --sun: #e0a800;
+      --h1-top: #0d1726; --h1-bottom: #2f6fb8; --glow: rgba(11,111,216,.16);
+      --shadow: 0 30px 70px rgba(20,40,80,.18);
+      color-scheme: light;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f9fd; --raise: #ffffff; --card: #ffffff; --line: #dde5ef;
+    --ink: #0d1726; --dim: #556479; --faint: #8a97a8;
+    --accent: #0b6fd8; --accent-ink: #ffffff; --sun: #e0a800;
+    --h1-top: #0d1726; --h1-bottom: #2f6fb8; --glow: rgba(11,111,216,.16);
+    --shadow: 0 30px 70px rgba(20,40,80,.18);
+    color-scheme: light;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 400 17px/1.6 "Hanken Grotesk", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased; overflow-x: hidden;
+  }
+  a { color: inherit; }
+  code, kbd, .mono { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: .86em; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+
+  nav { display: flex; align-items: center; gap: 18px; padding: 18px 0; }
+  nav .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 19px; text-decoration: none; }
+  nav .brand img { width: 30px; height: 30px; }
+  nav .sp { flex: 1; }
+  nav a.link { color: var(--dim); text-decoration: none; font-size: 15px; }
+  nav a.link:hover { color: var(--ink); }
+  .theme { background: none; border: 1px solid var(--line); color: var(--dim); border-radius: 8px; width: 34px; height: 34px; cursor: pointer; font-size: 15px; }
+  .theme:hover { color: var(--ink); }
+
+  header.hero { position: relative; text-align: center; padding: 64px 0 28px; }
+  header.hero::before {
+    content: ""; position: absolute; inset: -80px 0 auto; height: 520px; z-index: -1;
+    background: radial-gradient(600px 300px at 50% 30%, var(--glow), transparent 70%);
+  }
+  .hero img.icon { width: 112px; height: 112px; filter: drop-shadow(0 18px 40px rgba(11,111,216,.45)); }
+  h1 {
+    margin: 22px auto 14px; max-width: 760px; font-size: clamp(38px, 6.4vw, 66px); line-height: 1.04; font-weight: 800; letter-spacing: -.025em;
+    background: linear-gradient(180deg, var(--h1-top), var(--h1-bottom)); -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .lede { max-width: 620px; margin: 0 auto; color: var(--dim); font-size: 19px; }
+  .cta { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; margin: 30px 0 10px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 9px; padding: 12px 20px; border-radius: 12px;
+    font-weight: 600; font-size: 16px; text-decoration: none; border: 1px solid var(--line); background: var(--raise);
+  }
+  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+  .btn:hover { transform: translateY(-1px); }
+  .note { color: var(--faint); font-size: 14px; }
+
+  /* The capture overlay, drawn: a frozen desktop, a region and its toolbar. */
+  .shot { margin: 46px auto 0; max-width: 940px; border-radius: 14px; border: 1px solid var(--line); box-shadow: var(--shadow); overflow: hidden; }
+  .desk { position: relative; aspect-ratio: 16 / 9.4; background: linear-gradient(160deg, #1d4f8f 0%, #0e2a52 45%, #0a1d39 100%); }
+  .desk .menubar { position: absolute; inset: 0 0 auto; height: 22px; background: rgba(10,20,35,.55); backdrop-filter: blur(8px); display: flex; align-items: center; gap: 14px; padding: 0 12px; font-size: 12px; color: #dce6f3; }
+  .desk .menubar .r { margin-left: auto; display: flex; gap: 12px; align-items: center; }
+  .desk .menubar .vf { width: 13px; height: 13px; border: 1.6px solid #fff; border-radius: 3px; position: relative; }
+  .win { position: absolute; border-radius: 9px; background: #f4f6f9; box-shadow: 0 14px 40px rgba(0,0,0,.35); overflow: hidden; }
+  .win .tb { height: 22px; background: #e6e9ee; display: flex; gap: 6px; align-items: center; padding: 0 8px; }
+  .win .tb i { width: 9px; height: 9px; border-radius: 50%; background: #ff5f57; display: block; }
+  .win .tb i:nth-child(2) { background: #febc2e; } .win .tb i:nth-child(3) { background: #28c840; }
+  .win .body { padding: 14px 16px; }
+  .bar { height: 8px; border-radius: 4px; background: #d9dee6; margin: 0 0 9px; }
+  .chart { display: flex; align-items: flex-end; gap: 8px; height: 92px; margin-top: 14px; }
+  .chart span { flex: 1; border-radius: 4px 4px 0 0; background: linear-gradient(#4fb3ff, #1b6fd6); }
+  .dim { position: absolute; inset: 0; background: rgba(0,0,0,.42); }
+  .sel { position: absolute; left: 31%; top: 25%; width: 44%; height: 50%; box-shadow: 0 0 0 9999px rgba(0,0,0,.42); outline: 1.5px solid #fff; }
+  .sel .size { position: absolute; left: 0; top: -26px; font: 500 11px "JetBrains Mono", monospace; color: #fff; background: rgba(0,0,0,.6); padding: 3px 7px; border-radius: 5px; }
+  .sel .h { position: absolute; width: 8px; height: 8px; background: #fff; border-radius: 2px; }
+  .sel .arrow { position: absolute; left: 52%; top: 34%; width: 34%; height: 4px; background: #ff3b30; transform: rotate(-24deg); transform-origin: left center; border-radius: 2px; }
+  .sel .arrow::after { content: ""; position: absolute; right: -6px; top: -6px; border-left: 14px solid #ff3b30; border-top: 8px solid transparent; border-bottom: 8px solid transparent; }
+  .sel .box { position: absolute; left: 7%; top: 44%; width: 40%; height: 38%; border: 3px solid #ff3b30; border-radius: 4px; }
+  .sel .num { position: absolute; left: 44%; top: 30%; width: 22px; height: 22px; border-radius: 50%; background: #ff3b30; color: #fff; font: 700 12px/22px "Hanken Grotesk"; text-align: center; }
+  .tools { position: absolute; left: 31%; top: calc(75% + 10px); display: flex; gap: 2px; align-items: center; padding: 5px; border-radius: 10px; background: rgba(28,30,34,.92); box-shadow: 0 10px 30px rgba(0,0,0,.4); }
+  .tools b { width: 26px; height: 26px; border-radius: 6px; display: grid; place-items: center; color: #dfe6ef; font: 500 13px "Hanken Grotesk"; }
+  .tools b.on { background: #3b82f6; color: #fff; }
+  .tools .sep { width: 1px; height: 18px; background: rgba(255,255,255,.18); margin: 0 4px; }
+  .tools .dot { width: 14px; height: 14px; border-radius: 50%; }
+  .tools .done { padding: 0 10px; width: auto; background: #3b82f6; color: #fff; font-weight: 600; }
+
+  section { padding: 84px 0 0; }
+  h2 { font-size: clamp(28px, 3.6vw, 38px); line-height: 1.12; letter-spacing: -.02em; margin: 0 0 12px; font-weight: 800; }
+  .sub { color: var(--dim); max-width: 640px; margin: 0 0 34px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px 20px 18px; }
+  .card h3 { margin: 10px 0 6px; font-size: 18px; }
+  .card p { margin: 0; color: var(--dim); font-size: 15.5px; }
+  .glyph { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-weight: 700; }
+
+  .keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .key { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 22px; text-align: center; }
+  kbd.big { display: inline-block; font-size: 26px; font-weight: 500; padding: 8px 16px; border-radius: 10px; border: 1px solid var(--line); border-bottom-width: 3px; background: var(--raise); }
+  .key div { margin-top: 12px; color: var(--dim); }
+
+  .steps { counter-reset: s; display: grid; gap: 12px; padding: 0; margin: 0; list-style: none; max-width: 720px; }
+  .steps li { counter-increment: s; display: flex; gap: 14px; align-items: baseline; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; }
+  .steps li::before { content: counter(s); flex: none; width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); font-weight: 700; font-size: 14px; display: grid; place-items: center; transform: translateY(-1px); }
+  pre { background: var(--raise); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; overflow-x: auto; margin: 16px 0 0; max-width: 720px; }
+
+  .road { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 28px; padding: 0; list-style: none; color: var(--dim); max-width: 820px; }
+  .road li::before { content: "○"; color: var(--faint); margin-right: 8px; }
+  .road li.ok { color: var(--ink); } .road li.ok::before { content: "✓"; color: var(--accent); }
+
+  footer { margin: 100px 0 0; padding: 26px 0 40px; border-top: 1px solid var(--line); color: var(--faint); font-size: 14px; display: flex; flex-wrap: wrap; gap: 8px 22px; }
+  footer .sp { flex: 1; }
+
+  @media (max-width: 820px) {
+    .grid, .keys { grid-template-columns: 1fr; }
+    .road { grid-template-columns: 1fr; }
+    nav a.link.opt { display: none; }
+    .tools { transform: scale(.72); transform-origin: left top; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="brand" href="./"><img src="assets/icon.svg" alt="">Gannet</a>
+    <span class="sp"></span>
+    <a class="link opt" href="#features">Features</a>
+    <a class="link opt" href="#install">Install</a>
+    <a class="link" href="https://github.com/cuong95nddev/gannet">GitHub</a>
+    <button class="theme" id="theme" aria-label="Switch light or dark">◐</button>
+  </nav>
+
+  <header class="hero">
+    <img class="icon" src="assets/icon.svg" alt="Gannet icon">
+    <h1>Spot it. Dive. Captured.</h1>
+    <p class="lede">Gannet is a native screen capture tool that lives in the macOS menu bar. Press a shortcut, pick a region, a window or the whole screen, mark it up, and it's on your clipboard.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/cuong95nddev/gannet/releases/latest">↓ Download for macOS</a>
+      <a class="btn" href="https://github.com/cuong95nddev/gannet">View source</a>
+    </div>
+    <div class="note">Free and open source · macOS 12.3+ · Apple Silicon and Intel</div>
+
+    <div class="shot" role="img" aria-label="A region being captured: the screen is frozen and dimmed, the region is marked up with an arrow, a box and a number, with Gannet's toolbar below it">
+      <div class="desk">
+        <div class="menubar"><b></b><span>Finder</span><span>File</span><span>Edit</span><span>View</span><span class="r"><span class="vf"></span><span>Mon 9:41</span></span></div>
+        <div class="win" style="left:9%;top:13%;width:56%;height:62%">
+          <div class="tb"><i></i><i></i><i></i></div>
+          <div class="body">
+            <div class="bar" style="width:46%;height:10px;background:#c5ccd7"></div>
+            <div class="bar" style="width:88%"></div><div class="bar" style="width:72%"></div>
+            <div class="chart"><span style="height:40%"></span><span style="height:62%"></span><span style="height:48%"></span><span style="height:86%"></span><span style="height:70%"></span><span style="height:94%"></span></div>
+          </div>
+        </div>
+        <div class="win" style="left:58%;top:30%;width:34%;height:52%">
+          <div class="tb"><i></i><i></i><i></i></div>
+          <div class="body"><div class="bar" style="width:70%"></div><div class="bar" style="width:90%"></div><div class="bar" style="width:56%"></div><div class="bar" style="width:80%"></div><div class="bar" style="width:64%"></div></div>
+        </div>
+        <div class="sel">
+          <span class="size">1240 × 720</span>
+          <span class="h" style="left:-4px;top:-4px"></span><span class="h" style="right:-4px;top:-4px"></span>
+          <span class="h" style="left:-4px;bottom:-4px"></span><span class="h" style="right:-4px;bottom:-4px"></span>
+          <span class="box"></span><span class="arrow"></span><span class="num">1</span>
+        </div>
+        <div class="tools" aria-hidden="true">
+          <b>▭</b><b>◯</b><b>╱</b><b class="on">↗</b><b>✎</b><b>T</b><b>①</b><b>▦</b>
+          <span class="sep"></span>
+          <b><span class="dot" style="background:#ff3b30"></span></b><b><span class="dot" style="background:#ffd166"></span></b><b><span class="dot" style="background:#34c759"></span></b>
+          <span class="sep"></span>
+          <b>↶</b><b>↷</b><b class="done">Done</b>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <section id="features">
+    <h2>From shortcut to clipboard in a second</h2>
+    <p class="sub">The screen freezes the moment you press the shortcut, so menus, tooltips and video stay exactly as they were.</p>
+    <div class="grid">
+      <div class="card"><div class="glyph">▭</div><h3>Region</h3><p>Drag over the frozen screen with a live size readout, then mark it up right there.</p></div>
+      <div class="card"><div class="glyph">◫</div><h3>Window</h3><p>Click any window to capture it whole, without the drop shadow.</p></div>
+      <div class="card"><div class="glyph">▣</div><h3>Full screen</h3><p>Every display at its full resolution, one image each.</p></div>
+      <div class="card"><div class="glyph">↗</div><h3>Mark up</h3><p>Rectangles, ellipses, lines, arrows, pen, text, numbered steps and mosaic, in 8 colours and 3 sizes, with undo.</p></div>
+      <div class="card"><div class="glyph">⌘</div><h3>Your shortcuts</h3><p>Record any shortcut in Settings. Gannet warns when one clashes with macOS or another capture.</p></div>
+      <div class="card"><div class="glyph">↓</div><h3>Copied and saved</h3><p>Done copies the capture and saves a PNG to the folder you choose. ⌘S saves anywhere, ⌘C only copies.</p></div>
+    </div>
+  </section>
+
+  <section id="keys">
+    <h2>Three shortcuts to remember</h2>
+    <p class="sub">The system's own, with ⌃ in place of ⌘, so they never clash. Change them any time.</p>
+    <div class="keys">
+      <div class="key"><kbd class="big">⌃⇧4</kbd><div>Capture a region</div></div>
+      <div class="key"><kbd class="big">⌃⇧5</kbd><div>Capture a window</div></div>
+      <div class="key"><kbd class="big">⌃⇧3</kbd><div>Capture the full screen</div></div>
+    </div>
+  </section>
+
+  <section id="install">
+    <h2>Install</h2>
+    <p class="sub">Signed with a Developer ID and notarized by Apple, so it opens without warnings.</p>
+    <ol class="steps">
+      <li><span>Download the DMG from the <a href="https://github.com/cuong95nddev/gannet/releases/latest">latest release</a> and drag <b>Gannet</b> onto <b>Applications</b>.</span></li>
+      <li><span>Open Gannet. It lives in the menu bar: look for the viewfinder icon (there is no Dock icon).</span></li>
+      <li><span>On the first capture, allow <b>Screen Recording</b> for Gannet, then choose <b>Reopen Gannet</b> in Settings ▸ Permissions.</span></li>
+    </ol>
+    <p class="sub" style="margin:22px 0 0">Or build it yourself (Rust stable):</p>
+    <pre><code>git clone https://github.com/cuong95nddev/gannet
+cd gannet && scripts/install.sh</code></pre>
+  </section>
+
+  <section id="roadmap">
+    <h2>Where it's headed</h2>
+    <p class="sub">Gannet follows the feature set of <a href="https://www.faststone.org/FSCaptureDetail.htm">FastStone Capture</a>, on macOS. See the <a href="https://github.com/cuong95nddev/gannet/blob/main/ROADMAP.md">roadmap</a>.</p>
+    <ul class="road">
+      <li class="ok">Region, window and full screen captures</li>
+      <li class="ok">Mark up with undo and redo</li>
+      <li class="ok">Shortcuts you choose, save folder, permissions</li>
+      <li>Redaction that can't be read back</li>
+      <li>Scrolling capture of long pages</li>
+      <li>Repeat last region, delayed capture</li>
+      <li>An editor window for past captures</li>
+      <li>Screen recording to MP4 and GIF</li>
+    </ul>
+  </section>
+
+  <footer>
+    <span>Gannet · MIT License</span>
+    <a href="https://github.com/cuong95nddev/gannet">GitHub</a>
+    <a href="https://github.com/cuong95nddev/gannet/releases">Releases</a>
+    <span class="sp"></span>
+    <span>A sibling of <a href="https://cuong95nddev.github.io/tern/">Tern</a></span>
+  </footer>
+</div>
+<script>
+  document.getElementById("theme").addEventListener("click", () => {
+    const root = document.documentElement;
+    const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    root.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem("theme", root.dataset.theme); } catch {}
+  });
+</script>
+</body>
+</html>

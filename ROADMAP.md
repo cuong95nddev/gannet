@@ -58,8 +58,11 @@ feature set, on macOS. ✅ done, the rest in rough order.
 
 ## App
 
-- Settings window (shortcuts, output, file names)
-- Shortcuts you choose
+- ✅ Settings window with a sidebar: shortcuts you choose (recorded,
+  checked for clashes), the folder captures are saved to, permissions
+- Settings for the output format and file names
 - Floating capture toolbar (FastStone's capture panel)
 - Launch at login
-- Signed, notarized `.app`, Homebrew cask, updates
+- ✅ Signed with a Developer ID, notarized DMG from the Release workflow
+- ✅ Website (`site/`, GitHub Pages)
+- App icon, Homebrew cask, updates
