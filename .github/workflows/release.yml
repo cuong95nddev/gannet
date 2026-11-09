@@ -1,0 +1,97 @@
+# Push a tag like v0.1.0 to build a universal macOS DMG and publish it as a
+# GitHub release (the tag must match the version in Cargo.toml).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Check tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != Cargo.toml v$v"; exit 1; }
+      # Signing and notarization run only when the secrets are set (see
+      # README); without them the DMG holds an ad hoc signed app.
+      - name: Import signing certificate and notary key
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          SIGN_ID: ${{ secrets.MACOS_SIGN_ID }}
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+        run: |
+          [ -n "$CERT_P12" ] || { echo "no signing secrets: ad hoc build"; exit 0; }
+          KC="$RUNNER_TEMP/sign.keychain-db"
+          KC_PASS=$(openssl rand -hex 16)
+          security create-keychain -p "$KC_PASS" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PASS" "$KC"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KC_PASS" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          echo "GANNET_SIGN_ID=$SIGN_ID" >> "$GITHUB_ENV"
+          if [ -n "$NOTARY_KEY" ]; then
+            echo "$NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+            xcrun notarytool store-credentials gannet-notary --keychain "$KC" \
+              --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER"
+            rm "$RUNNER_TEMP/notary.p8"
+            echo "GANNET_NOTARY_PROFILE=gannet-notary" >> "$GITHUB_ENV"
+            echo "GANNET_NOTARY_KEYCHAIN=$KC" >> "$GITHUB_ENV"
+          fi
+      - name: Build DMG
+        id: dmg
+        # An assignment, not `echo "path=$(…)"`: echo's status would hide
+        # the script failing, leaving the upload an empty path.
+        run: |
+          dmg=$(scripts/release.sh dist)
+          echo "path=$dmg" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: gannet-macos
+          path: ${{ steps.dmg.outputs.path }}
+
+  publish:
+    needs: [macos]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: gannet-*
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          files: dist/*.dmg
+          generate_release_notes: true
+          # v1.2.3-rc1: a prerelease, which /releases/latest skips.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            ## Install (macOS 12.3+, Apple Silicon and Intel)
+
+            1. Open the DMG and drag **Gannet** onto **Applications**.
+            2. Open Gannet: it lives in the menu bar (no Dock icon).
+            3. On the first capture macOS asks for **Screen Recording**: allow
+               Gannet, then choose **Reopen Gannet** in Settings ▸ Permissions.
+
+            `⌃⇧4` region, `⌃⇧5` window, `⌃⇧3` full screen; change them in
+            **Settings…** from the menu bar item.
