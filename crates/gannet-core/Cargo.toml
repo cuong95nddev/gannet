@@ -1,0 +1,12 @@
+[package]
+name = "gannet-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Screen grabs, markup and export for Gannet, without any UI."
+
+[dependencies]
+ab_glyph = "0.2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
+log = "0.4"
+tiny-skia = "0.11"

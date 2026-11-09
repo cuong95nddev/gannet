@@ -1,0 +1,21 @@
+[package]
+name = "gannet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A screen capture tool for macOS that lives in the menu bar."
+
+[dependencies]
+dispatch2 = "0.3"
+env_logger = "0.11"
+flume = "0.12"
+gannet-core = { path = "../gannet-core" }
+global-hotkey = "0.8"
+gpui-kit = "=0.7.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+log = "0.4"
+lyon_tessellation = "1"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSButton", "NSControl", "NSView", "NSWindow", "NSScreen", "NSGraphics"] }
+raw-window-handle = "0.6"
+objc2-foundation = { version = "0.3.2", features = ["NSString"] }
