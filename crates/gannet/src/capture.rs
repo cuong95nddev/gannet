@@ -224,16 +224,26 @@ pub(crate) fn ns_view(window: &Window) -> Option<std::ptr::NonNull<std::ffi::c_v
 /// frame below the menu bar whatever its level. Borderless, it isn't
 /// (GPUI's panel class can still become key, so keys reach the overlay).
 fn cover_display(view: usize) {
-    use objc2_app_kit::{NSScreenSaverWindowLevel, NSView, NSWindowStyleMask};
+    use objc2_app_kit::{NSScreenSaverWindowLevel, NSView};
 
     // SAFETY: GPUI's AppKit handle is its NSView. This runs on the main
     // queue right after the window opened, before anything can close it.
     let view: &NSView = unsafe { &*(view as *const NSView) };
     let Some(ns_window) = view.window() else { return };
     let Some(screen) = ns_window.screen() else { return };
-    ns_window.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
+    crate::capture::borderless(&ns_window);
     ns_window.setLevel(NSScreenSaverWindowLevel);
     ns_window.setFrame_display(screen.frame(), true);
+}
+
+/// Make a GPUI window borderless and non-activating, keeping it see-through
+/// where nothing is drawn: a new style mask leaves AppKit's window opaque,
+/// which fills the corners of a rounded bar.
+pub(crate) fn borderless(window: &objc2_app_kit::NSWindow) {
+    use objc2_app_kit::{NSColor, NSWindowStyleMask};
+    window.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
+    window.setOpaque(false);
+    window.setBackgroundColor(Some(&NSColor::clearColor()));
 }
 
 /// Close the overlays (after the current update, which may be one of theirs).

@@ -10,7 +10,7 @@
 
 use gpui_kit::*;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSView, NSWindow, NSWindowOrderingMode, NSWindowStyleMask};
+use objc2_app_kit::{NSView, NSWindow, NSWindowOrderingMode};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use crate::capture;
@@ -103,7 +103,7 @@ fn attach(parent_view: usize, view: usize, anchor: (f64, f64, f64, f64), size: (
     let vf = screen.visibleFrame();
     let visible = Rect { x: vf.origin.x, y: vf.origin.y, w: vf.size.width, h: vf.size.height };
     let (x, y) = place(rect, size, visible);
-    popup.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
+    crate::capture::borderless(&popup);
     popup.setFrame_display(NSRect::new(NSPoint::new(x, y), NSSize::new(size.0, size.1)), true);
     popup.setHasShadow(true);
     popup.setIgnoresMouseEvents(kind == Kind::Passive);

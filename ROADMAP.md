@@ -90,4 +90,5 @@ feature set, on macOS. ✅ done, the rest in rough order.
 - Launch at login
 - ✅ Signed with a Developer ID, notarized DMG from the Release workflow
 - ✅ Website (`site/`, GitHub Pages)
-- App icon, Homebrew cask, updates
+- ✅ App icon (`scripts/icon.sh` makes it from the website's)
+- Homebrew cask, updates

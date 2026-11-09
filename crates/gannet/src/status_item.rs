@@ -11,7 +11,7 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn, NSEventMask, NSEventModifierFlags,
     NSEventType, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
 };
-use objc2_foundation::{NSRect, NSString, ns_string};
+use objc2_foundation::{NSData, NSRect, NSSize, NSString, ns_string};
 
 use gannet_core::settings::{Action, Shortcuts};
 
@@ -121,9 +121,12 @@ pub fn install(tx: flume::Sender<Command>) {
     NSApplication::sharedApplication(mtm).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     let item = NSStatusBar::systemStatusBar().statusItemWithLength(-1.0); // NSVariableStatusItemLength
     if let Some(button) = item.button(mtm) {
-        let image =
-            NSImage::imageWithSystemSymbolName_accessibilityDescription(ns_string!("camera.viewfinder"), Some(ns_string!("Gannet")));
+        // Gannet's own icon, drawn as a template (scripts/icon.sh).
+        let data = NSData::with_bytes(include_bytes!("../resources/MenuBarIcon.pdf"));
+        let image = NSImage::initWithData(<NSImage as objc2::AnyThread>::alloc(), &data);
         if let Some(image) = image {
+            image.setSize(NSSize::new(18., 18.));
+            image.setAccessibilityDescription(Some(ns_string!("Gannet")));
             image.setTemplate(true);
             button.setImage(Some(&image));
         }

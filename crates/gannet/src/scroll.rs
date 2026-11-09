@@ -17,7 +17,7 @@ use gannet_core::model::P;
 use gannet_core::stitch::{Push, Stitcher};
 use gpui_kit::*;
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSScreen, NSStatusWindowLevel, NSView, NSWindowStyleMask};
+use objc2_app_kit::{NSScreen, NSStatusWindowLevel, NSView};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use crate::capture;
@@ -188,7 +188,7 @@ fn place(view: usize, rect: Rect, passive: bool) {
     // queue right after the window opened, before anything closed it.
     let view: &NSView = unsafe { &*(view as *const NSView) };
     let Some(window) = view.window() else { return };
-    window.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
+    crate::capture::borderless(&window);
     window.setFrame_display(rect.ns(), true);
     window.setHasShadow(!passive);
     window.setIgnoresMouseEvents(passive);

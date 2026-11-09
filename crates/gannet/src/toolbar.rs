@@ -307,7 +307,7 @@ fn watch_clicks(tx: flume::Sender<Command>) -> Option<ClickMonitor> {
 /// other apps' windows but below menus; floating, back where it was left;
 /// off screen if `away` (the library is open).
 fn float(view: usize, away: bool, attached: bool) {
-    use objc2_app_kit::{NSFloatingWindowLevel, NSView, NSWindowStyleMask};
+    use objc2_app_kit::{NSFloatingWindowLevel, NSView};
     use objc2_foundation::NSString;
 
     // SAFETY: GPUI's AppKit handle is its NSView, still open: this runs on
@@ -315,7 +315,7 @@ fn float(view: usize, away: bool, attached: bool) {
     let view: &NSView = unsafe { &*(view as *const NSView) };
     let Some(window) = view.window() else { return };
     let frame = window.frame();
-    window.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
+    crate::capture::borderless(&window);
     window.setFrame_display(frame, true);
     window.setLevel(NSFloatingWindowLevel);
     window.setHasShadow(true);

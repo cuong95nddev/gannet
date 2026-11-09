@@ -17,7 +17,8 @@ BUNDLE_VERSION=${VERSION%%[-+]*}
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 APP="$STAGE/Gannet.app"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "$ROOT/crates/gannet/resources/AppIcon.icns" "$APP/Contents/Resources/"
 
 if [ "${GANNET_UNIVERSAL:-}" = 1 ]; then
     for t in aarch64-apple-darwin x86_64-apple-darwin; do
@@ -41,6 +42,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundleIdentifier</key><string>dev.gannet</string>
     <key>CFBundleExecutable</key><string>gannet</string>
     <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleShortVersionString</key><string>$BUNDLE_VERSION</string>
     <key>CFBundleVersion</key><string>$BUNDLE_VERSION</string>
     <key>LSMinimumSystemVersion</key><string>12.3</string>
