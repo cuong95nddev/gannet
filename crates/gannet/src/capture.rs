@@ -8,6 +8,7 @@ use gpui_kit::*;
 use image::RgbaImage;
 
 use crate::overlay::Overlay;
+use crate::prefs;
 
 /// What a capture takes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -168,7 +169,7 @@ fn open_overlays(grabs: Vec<Grab>, cx: &mut App) {
 }
 
 /// The window's NSView (AppKit's raw handle).
-fn ns_view(window: &Window) -> Option<std::ptr::NonNull<std::ffi::c_void>> {
+pub(crate) fn ns_view(window: &Window) -> Option<std::ptr::NonNull<std::ffi::c_void>> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     match HasWindowHandle::window_handle(window).ok()?.as_raw() {
         RawWindowHandle::AppKit(appkit) => Some(appkit.ns_view),
@@ -210,8 +211,9 @@ pub fn deliver(img: RgbaImage, cx: &mut App) {
         Ok(bytes) => cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, bytes))),
         Err(e) => return notify("Couldn't copy the capture", &e, cx),
     }
+    let dir = prefs::captures_dir(cx);
     cx.spawn(async move |cx| {
-        let saved = cx.background_executor().spawn(async move { store::save(&img, &store::captures_dir()) }).await;
+        let saved = cx.background_executor().spawn(async move { store::save(&img, &dir) }).await;
         cx.update(|cx| match saved {
             Ok(path) => log::info!("saved {}", path.display()),
             Err(e) => notify("Couldn't save the capture", &e, cx),
@@ -222,7 +224,7 @@ pub fn deliver(img: RgbaImage, cx: &mut App) {
 
 /// `img` to a file the user picks.
 pub fn save_as(img: RgbaImage, cx: &mut App) {
-    let rx = cx.prompt_for_new_path(&store::captures_dir(), Some("Capture.png"));
+    let rx = cx.prompt_for_new_path(&prefs::captures_dir(cx), Some("Capture.png"));
     cx.spawn(async move |cx| {
         let Ok(Ok(Some(path))) = rx.await else { return };
         if let Err(e) = img.save_with_format(&path, image::ImageFormat::Png) {

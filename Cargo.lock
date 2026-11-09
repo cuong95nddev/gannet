@@ -1964,6 +1964,7 @@ dependencies = [
 name = "gannet"
 version = "0.1.0"
 dependencies = [
+ "block2 0.6.2",
  "dispatch2",
  "env_logger",
  "flume",
@@ -1976,6 +1977,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "objc2-user-notifications",
  "raw-window-handle",
 ]
 
@@ -1986,6 +1988,8 @@ dependencies = [
  "ab_glyph",
  "image",
  "log",
+ "serde",
+ "serde_json",
  "tiny-skia",
 ]
 

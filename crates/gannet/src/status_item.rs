@@ -10,9 +10,10 @@ use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem};
 use objc2_foundation::{NSString, ns_string};
 
+use gannet_core::settings::{Action, Shortcuts};
+
 use crate::Command;
 use crate::capture::Mode;
-use crate::hotkeys;
 
 static TX: OnceLock<flume::Sender<Command>> = OnceLock::new();
 
@@ -45,6 +46,11 @@ define_class!(
             send(Command::Capture(Mode::Screen));
         }
 
+        #[unsafe(method(settings:))]
+        fn settings(&self, _sender: &NSMenuItem) {
+            send(Command::OpenSettings);
+        }
+
         #[unsafe(method(openCaptures:))]
         fn open_captures(&self, _sender: &NSMenuItem) {
             send(Command::OpenCaptures);
@@ -68,6 +74,8 @@ impl Target {
 struct Ui {
     _item: Retained<NSStatusItem>,
     _target: Retained<Target>,
+    /// The capture items, retitled when their shortcuts change.
+    captures: Vec<(Action, Retained<NSMenuItem>)>,
 }
 
 thread_local! {
@@ -90,20 +98,34 @@ pub fn install(tx: flume::Sender<Command>) {
     }
     let target = Target::new(mtm);
     let menu = NSMenu::new(mtm);
-    let entries: [(String, Sel); 3] = [
-        (format!("Capture Region\t{}", hotkeys::label(Mode::Region)), sel!(region:)),
-        (format!("Capture Window\t{}", hotkeys::label(Mode::Window)), sel!(window:)),
-        (format!("Capture Full Screen\t{}", hotkeys::label(Mode::Screen)), sel!(screen:)),
-    ];
-    for (title, action) in entries {
-        menu.addItem(&menu_item(&title, action, &target, mtm));
+    let entries: [(Action, Sel); 3] = [(Action::Region, sel!(region:)), (Action::Window, sel!(window:)), (Action::Screen, sel!(screen:))];
+    let mut captures = Vec::new();
+    for (a, action) in entries {
+        let item = menu_item(a.title(), action, &target, mtm);
+        menu.addItem(&item);
+        captures.push((a, item));
     }
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&menu_item("Open Captures Folder", sel!(openCaptures:), &target, mtm));
+    menu.addItem(&menu_item("Settings…", sel!(settings:), &target, mtm));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&menu_item("Quit Gannet", sel!(quit:), &target, mtm));
     item.setMenu(Some(&menu));
-    UI.with(|u| *u.borrow_mut() = Some(Ui { _item: item, _target: target }));
+    UI.with(|u| *u.borrow_mut() = Some(Ui { _item: item, _target: target, captures }));
+}
+
+/// Show `shortcuts` next to their captures. Main thread only.
+pub fn refresh(shortcuts: &Shortcuts) {
+    UI.with(|u| {
+        let Some(ui) = &*u.borrow() else { return };
+        for (a, item) in &ui.captures {
+            let title = match shortcuts.get(*a) {
+                Some(s) => format!("{}\t{}", a.title(), s.label()),
+                None => a.title().to_owned(),
+            };
+            item.setTitle(&NSString::from_str(&title));
+        }
+    });
 }
 
 fn menu_item(title: &str, action: Sel, target: &Target, mtm: MainThreadMarker) -> Retained<NSMenuItem> {

@@ -6,6 +6,10 @@ mod capture;
 mod hotkeys;
 mod overlay;
 mod paint;
+mod permissions;
+mod popup_menu;
+mod prefs;
+mod settings_window;
 mod status_item;
 
 use gpui_kit::*;
@@ -15,6 +19,7 @@ use gpui_kit::*;
 pub enum Command {
     Capture(capture::Mode),
     OpenCaptures,
+    OpenSettings,
     Quit,
 }
 
@@ -25,6 +30,7 @@ fn main() {
         let (tx, rx) = flume::unbounded::<Command>();
         status_item::install(tx.clone());
         hotkeys::install(tx, cx);
+        prefs::init(cx);
         capture::init(cx);
         cx.spawn(async move |cx| {
             while let Ok(cmd) = rx.recv_async().await {
@@ -36,6 +42,10 @@ fn main() {
         // `--capture region|window|screen`: start one right away.
         if let Some(mode) = capture_arg() {
             capture::start(mode, cx);
+        }
+        // `--settings`: open the Settings window.
+        if std::env::args().any(|a| a == "--settings") {
+            settings_window::open(cx);
         }
     });
 }
@@ -54,10 +64,11 @@ fn run(cmd: Command, cx: &mut App) {
     match cmd {
         Command::Capture(mode) => capture::start(mode, cx),
         Command::OpenCaptures => {
-            let dir = gannet_core::store::captures_dir();
+            let dir = prefs::captures_dir(cx);
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::process::Command::new("/usr/bin/open").arg(&dir).spawn();
         },
+        Command::OpenSettings => settings_window::open(cx),
         Command::Quit => cx.quit(),
     }
 }
