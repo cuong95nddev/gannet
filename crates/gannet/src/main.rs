@@ -8,6 +8,7 @@ mod dock;
 mod hotkeys;
 mod icons;
 mod library;
+mod menus;
 mod open_panel;
 mod overlay;
 mod paint;
@@ -60,13 +61,17 @@ pub fn send(cx: &App, cmd: Command) {
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    gpui_kit::application().with_assets(icons::Assets).run(|cx| {
+    let app = gpui_kit::application().with_assets(icons::Assets);
+    // The Dock icon clicked with no window open: the library (editor).
+    app.on_reopen(library::open);
+    app.run(|cx| {
         gpui_kit::init(cx);
         let (tx, rx) = flume::unbounded::<Command>();
         status_item::install(tx.clone());
         cx.set_global(Commands(tx.clone()));
         hotkeys::install(tx, cx);
         prefs::init(cx);
+        menus::init(cx);
         capture::init(cx);
         library::init(cx);
         cx.spawn(async move |cx| {

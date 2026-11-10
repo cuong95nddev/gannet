@@ -225,6 +225,16 @@ pub fn icon_frame() -> Option<NSRect> {
     })
 }
 
+/// The window number of the icon's window. Main thread only.
+pub fn icon_window_number() -> Option<isize> {
+    UI.with(|u| {
+        let ui = u.borrow();
+        let ui = ui.as_ref()?;
+        let mtm = MainThreadMarker::new()?;
+        Some(ui.item.button(mtm)?.window()?.windowNumber())
+    })
+}
+
 fn menu_item(title: &str, action: Sel, target: &Target, mtm: MainThreadMarker) -> Retained<NSMenuItem> {
     // SAFETY: the selectors are methods of `Target`.
     let item = unsafe {

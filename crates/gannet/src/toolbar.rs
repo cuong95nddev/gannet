@@ -184,11 +184,13 @@ struct Toolbar {
     window: Option<AnyWindowHandle>,
     /// The bar open is the one under the menu bar icon.
     attached: bool,
-    /// Closes the bar under the icon at a click elsewhere.
-    monitor: Option<ClickMonitor>,
+    /// Close the bar under the icon at a click elsewhere: in other apps,
+    /// and in Gannet's own windows.
+    monitors: Vec<ClickMonitor>,
     /// Ordered out for a capture, to come back after it.
     stepped_aside: bool,
-    /// Ordered out while the library window is open.
+    /// The library window is open: the floating bar is ordered out (the
+    /// bar under the icon, asked for by a click, shows over it).
     library_open: bool,
     /// The button under the pointer (an index into `ITEMS`).
     hovered: Option<usize>,
@@ -277,30 +279,52 @@ fn show(attached: bool, cx: &mut App) {
         Ok((handle, _)) => {
             // AppKit calls back into GPUI while the window changes, so
             // after this update, from the main queue.
-            let away = cx.default_global::<Toolbar>().library_open;
+            let away = !attached && cx.default_global::<Toolbar>().library_open;
             if let Ok(Some(view)) = handle.update(cx, |_, window, _| capture::ns_view(window)) {
                 let view = view.as_ptr() as usize;
                 dispatch2::DispatchQueue::main().exec_async(move || float(view, away, attached));
             }
-            let monitor = if attached { watch_clicks(crate::sender(cx)) } else { None };
+            let monitors = if attached {
+                let own = ns_window(handle, cx).map(|w| w.windowNumber());
+                watch_clicks(own, crate::sender(cx))
+            } else {
+                Vec::new()
+            };
             let t = cx.default_global::<Toolbar>();
             t.window = Some(handle);
             t.attached = attached;
-            t.monitor = monitor;
+            t.monitors = monitors;
         },
         Err(e) => log::error!("can't open the capture toolbar: {e}"),
     }
 }
 
-/// Close the bar under the icon at a click in another app. (Clicks in
-/// Gannet's own windows and on its icon don't reach a global monitor.)
-fn watch_clicks(tx: flume::Sender<Command>) -> Option<ClickMonitor> {
+/// Close the bar under the icon at a click elsewhere: in another app (a
+/// global monitor), or in one of Gannet's own windows other than the bar
+/// itself (window number `own`) and the menu bar icon, which toggles it.
+fn watch_clicks(own: Option<isize>, tx: flume::Sender<Command>) -> Vec<ClickMonitor> {
     use objc2_app_kit::{NSEvent, NSEventMask};
-    let block = block2::RcBlock::new(move |_: std::ptr::NonNull<NSEvent>| {
-        let _ = tx.send(Command::CloseAttachedToolbar);
-    });
     let mask = NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::OtherMouseDown;
-    NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &block).map(ClickMonitor)
+    let global = {
+        let tx = tx.clone();
+        let block = block2::RcBlock::new(move |_: std::ptr::NonNull<NSEvent>| {
+            let _ = tx.send(Command::CloseAttachedToolbar);
+        });
+        NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &block)
+    };
+    let local = {
+        let block = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
+            // SAFETY: AppKit hands the monitor a live event.
+            let number = unsafe { event.as_ref() }.windowNumber();
+            if Some(number) != own && Some(number) != status_item::icon_window_number() {
+                let _ = tx.send(Command::CloseAttachedToolbar);
+            }
+            event.as_ptr()
+        });
+        // SAFETY: the block passes every event on, unchanged.
+        unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &block) }
+    };
+    [global, local].into_iter().flatten().map(ClickMonitor).collect()
 }
 
 /// Square (borderless: macOS rounds a titled window's corners), above
@@ -318,7 +342,20 @@ fn float(view: usize, away: bool, attached: bool) {
     crate::capture::borderless(&window);
     window.setFrame_display(frame, true);
     window.setLevel(NSFloatingWindowLevel);
-    window.setHasShadow(true);
+    // AppKit's shadow follows the window's square frame (with a light rim
+    // in dark mode), which would show around the rounded bar's corners.
+    window.setHasShadow(!attached);
+    if attached {
+        // Clip to the bar's rounded corners, whatever is drawn under them.
+        if let Some(content) = window.contentView() {
+            content.setWantsLayer(true);
+            if let Some(layer) = content.layer() {
+                // SAFETY: CALayer's `cornerRadius` setter, with a CGFloat.
+                let () = unsafe { objc2::msg_send![&*layer, setCornerRadius: 8.0f64] };
+                layer.setMasksToBounds(true);
+            }
+        }
+    }
     if !attached {
         let name = NSString::from_str(AUTOSAVE);
         window.setFrameUsingName(&name);
@@ -373,7 +410,8 @@ pub fn library_open(open: bool, cx: &mut App) {
 /// On screen or off, as the capture and the library want.
 fn place(cx: &mut App) {
     let Some(t) = cx.try_global::<Toolbar>() else { return };
-    let (Some(handle), away) = (t.window, t.stepped_aside || t.library_open) else { return };
+    let away = t.stepped_aside || (t.library_open && !t.attached);
+    let (Some(handle), away) = (t.window, away) else { return };
     let Some(window) = ns_window(handle, cx) else { return };
     if away {
         window.orderOut(None);

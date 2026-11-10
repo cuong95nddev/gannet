@@ -27,8 +27,6 @@ const KEY_ESCAPE: u16 = 0x35;
 
 const KEY_CONTEXT: &str = "GannetSettings";
 
-gpui_kit::actions!(gannet_settings, [CloseWindow]);
-
 /// The open window, if there is one.
 #[derive(Default)]
 struct Open(Option<AnyWindowHandle>);
@@ -37,14 +35,13 @@ impl Global for Open {}
 
 /// Show the Settings window, opening it if it isn't open.
 pub fn open(cx: &mut App) {
+    // A regular app before it is active (see `library::show_window`).
+    dock::set(dock::Window::Settings, true, cx);
     cx.activate(true);
     if let Some(handle) = cx.try_global::<Open>().and_then(|o| o.0)
         && handle.update(cx, |_, window, _| window.activate_window()).is_ok()
     {
         return;
-    }
-    if !cx.has_global::<Open>() {
-        cx.bind_keys([KeyBinding::new("cmd-w", CloseWindow, Some(KEY_CONTEXT))]);
     }
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(700.), px(460.)), cx))),
@@ -958,7 +955,7 @@ impl Render for SettingsView {
         };
         div()
             .key_context(KEY_CONTEXT)
-            .on_action(|_: &CloseWindow, window, _| window.remove_window())
+            .on_action(|_: &crate::menus::CloseWindow, window, _| window.remove_window())
             .size_full()
             .flex()
             .bg(pal.window)
