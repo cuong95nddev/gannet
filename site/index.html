@@ -31,31 +31,32 @@
   body {
     margin: 0; background: var(--bg); color: var(--ink);
     font: 400 17px/1.6 "Hanken Grotesk", system-ui, -apple-system, sans-serif;
-    -webkit-font-smoothing: antialiased;
+    -webkit-font-smoothing: antialiased; overflow-x: hidden;
   }
   a { color: inherit; }
   kbd, code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: .88em; }
   main { max-width: 640px; margin: 0 auto; padding: 0 20px; }
 
-  nav { display: flex; justify-content: space-between; align-items: center; padding: 22px 0; font-size: 15px; }
+  nav { display: flex; justify-content: space-between; align-items: center; padding: 16px 0; font-size: 15px; }
   nav a { color: var(--dim); text-decoration: none; }
   nav a:hover { color: var(--ink); }
   nav .brand { color: var(--ink); font-weight: 700; display: flex; align-items: center; gap: 8px; }
   nav .brand img { width: 22px; height: 22px; }
 
-  header { text-align: center; padding: 72px 0 64px; }
-  header img { width: 96px; height: 96px; }
-  h1 { font-size: clamp(36px, 7vw, 52px); line-height: 1.05; letter-spacing: -.03em; margin: 28px 0 14px; font-weight: 700; }
-  .lede { color: var(--dim); font-size: 19px; margin: 0 auto 32px; max-width: 460px; }
+  header { text-align: center; padding: 18px 0 56px; }
+  .cta { display: flex; align-items: center; justify-content: center; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: clamp(30px, 6vw, 44px); line-height: 1.1; letter-spacing: -.03em; margin: 0 0 6px; font-weight: 700; }
+  .lede { color: var(--dim); font-size: 18px; margin: 0 auto 18px; max-width: 520px; }
   .btn {
     display: inline-block; padding: 12px 22px; border-radius: 999px; background: var(--ink); color: var(--bg);
     font-weight: 500; text-decoration: none;
   }
   .btn:hover { opacity: .85; }
-  .meta { color: var(--dim); font-size: 14px; margin-top: 14px; }
 
   section { border-top: 1px solid var(--line); padding: 44px 0; }
   h2 { font-size: 14px; font-weight: 500; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 20px; }
+  h3 { font-size: 22px; letter-spacing: -.02em; margin: 0 0 6px; font-weight: 700; }
+  .cap { color: var(--dim); margin: 0 0 22px; max-width: 560px; }
 
   kbd { border: 1px solid var(--line); border-bottom-width: 2px; background: var(--soft); border-radius: 7px; padding: 3px 9px; }
 
@@ -69,6 +70,156 @@
   footer { border-top: 1px solid var(--line); padding: 28px 0 48px; color: var(--dim); font-size: 14px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
   footer a { text-decoration: none; }
   footer a:hover { color: var(--ink); }
+
+  /* ---- Showcase: the app's own UI, drawn in HTML at its real sizes ---- */
+  .wide { width: min(1120px, calc(100vw - 32px)); margin-left: 50%; transform: translateX(-50%); }
+  .shot { position: relative; margin: 0 0 12px; }
+  .fit { position: relative; overflow: hidden; border-radius: 12px; }
+  .fit > .scene { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+  .legend { color: var(--dim); font-size: 14px; display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 14px 0 0; }
+  .legend b { color: var(--ink); font-weight: 500; }
+
+  .scene {
+    --BG: #161618; --PANEL: #1e1f22; --TEXT: #e8e8ea; --DIM: #8e8e93;
+    --BAR: rgba(30,31,34,.95); --BARLINE: rgba(255,255,255,.15); --LINE: rgba(255,255,255,.1);
+    --HOVER: rgba(255,255,255,.12); --QUIET: rgba(255,255,255,.08);
+    color: var(--TEXT); font: 13px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Hanken Grotesk", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased; user-select: none;
+  }
+  .scene svg.lucide { width: 16px; height: 16px; stroke-width: 2; display: block; }
+  .scene .s14 svg.lucide { width: 14px; height: 14px; }
+
+  /* window chrome */
+  .win { position: absolute; inset: 0; border-radius: 12px; overflow: hidden; background: var(--BG);
+         box-shadow: 0 0 0 1px rgba(255,255,255,.12) inset, 0 30px 80px rgba(0,0,0,.35); }
+  .titlebar { height: 28px; display: flex; align-items: center; justify-content: center; position: relative;
+              background: #26272a; border-bottom: 1px solid #0c0c0d; color: #b4b4b8; font-size: 13px; font-weight: 600; }
+  .lights { position: absolute; left: 12px; top: 8px; display: flex; gap: 8px; }
+  .lights i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+  .lights i:nth-child(1) { background: #ff5f57; } .lights i:nth-child(2) { background: #febc2e; } .lights i:nth-child(3) { background: #28c840; }
+  .stage { position: absolute; top: 28px; left: 0; right: 0; bottom: 0; background: var(--BG);
+           background-image: radial-gradient(rgba(255,255,255,.035) 1px, transparent 1px); background-size: 16px 16px; }
+
+  /* shared controls (ui.rs) */
+  .bar { position: absolute; display: flex; align-items: center; gap: 2px; padding: 0 6px; border-radius: 8px;
+         background: var(--BAR); border: 1px solid var(--BARLINE); color: var(--TEXT); }
+  .b { width: 26px; height: 26px; border-radius: 6px; display: flex; align-items: center; justify-content: center; flex: none; }
+  .b.on { background: #fff; color: #000; }
+  .b.off { opacity: .3; }
+  .sep { width: 1px; height: 16px; margin: 0 4px; background: rgba(255,255,255,.18); flex: none; }
+  .pill { height: 26px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; background: #fff; color: #000; font-weight: 500; flex: none; }
+  .dot { width: 24px; height: 24px; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
+  .dot.on { background: rgba(255,255,255,.2); }
+  .dot i { display: block; border-radius: 50%; background: #fff; }
+  .sw { width: 22px; height: 22px; border-radius: 50%; border: 2px solid transparent; display: flex; align-items: center; justify-content: center; }
+  .sw.on { border-color: #fff; }
+  .sw i { width: 14px; height: 14px; border-radius: 50%; display: block; border: 1px solid rgba(255,255,255,.25); }
+  .panel { position: absolute; border-radius: 10px; overflow: hidden; background: var(--BAR); border: 1px solid var(--BARLINE); display: flex; flex-direction: column; }
+  .ptop { height: 40px; display: flex; align-items: center; padding: 0 6px 0 12px; border-bottom: 1px solid var(--LINE); flex: none; gap: 2px; }
+  .ptop .t { flex: 1; font-size: 12px; font-weight: 600; }
+  .ptop .b { width: 24px; height: 24px; }
+
+  /* capture tree */
+  .tree { padding: 6px; display: flex; flex-direction: column; gap: 1px; flex: 1; }
+  .fold { height: 28px; display: flex; align-items: center; gap: 6px; padding: 0 6px; border-radius: 6px; color: var(--TEXT); font-weight: 500; }
+  .fold .ic { color: var(--DIM); }
+  .fold .n { margin-left: auto; color: var(--DIM); font-size: 12px; font-weight: 400; }
+  .row { margin-left: 11px; padding-left: 8px; border-left: 1px solid var(--LINE); }
+  .row > div { display: flex; align-items: center; gap: 10px; padding: 4px; border-radius: 6px; }
+  .row > div.cur { background: rgba(255,255,255,.15); }
+  .row .th { width: 84px; height: 48px; border-radius: 4px; overflow: hidden; background: var(--BG); flex: none; position: relative; }
+  .row .tm { font-size: 12px; color: var(--DIM); }
+  .row .cur .tm { color: var(--TEXT); }
+  .trash { margin-top: auto; border-top: 1px solid var(--LINE); padding: 6px; }
+
+  /* layers */
+  .layers { padding: 6px; display: flex; flex-direction: column; gap: 1px; }
+  .lr { height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border-radius: 6px; }
+  .lr.on { background: #fff; color: #000; }
+  .lr .nm { flex: 1; }
+  .lr .cd { width: 10px; height: 10px; border-radius: 50%; border: 1px solid rgba(255,255,255,.25); flex: none; }
+  .lr .eye { color: var(--DIM); }
+  .lr.on .eye { color: #555; }
+
+  .chip { position: absolute; padding: 3px 8px; border-radius: 6px; background: rgba(0,0,0,.75); font-size: 12px; }
+
+  /* a made-up page, as the picture being marked up */
+  .pg { position: absolute; inset: 0; background: #fbfbfc; color: #1b1c1f; font: 11px/1.35 -apple-system, "Hanken Grotesk", system-ui, sans-serif; overflow: hidden; }
+  .pg .top { height: 34px; display: flex; align-items: center; gap: 14px; padding: 0 16px; border-bottom: 1px solid #eceef1; background: #fff; }
+  .pg .logo { width: 16px; height: 16px; border-radius: 5px; background: #2f6bff; }
+  .pg .lnk { color: #6b7280; }
+  .pg .lnk.on { color: #111; font-weight: 600; }
+  .pg .av { margin-left: auto; width: 20px; height: 20px; border-radius: 50%; background: linear-gradient(135deg,#f6a,#fa6); }
+  .pg .body { display: flex; height: calc(100% - 34px); }
+  .pg .nav { width: 128px; border-right: 1px solid #eceef1; padding: 12px 10px; display: flex; flex-direction: column; gap: 6px; background: #fff; }
+  .pg .nav span { padding: 4px 8px; border-radius: 6px; color: #4b5563; }
+  .pg .nav span.on { background: #eef3ff; color: #2f6bff; font-weight: 600; }
+  .pg .cont { flex: 1; padding: 16px 18px; }
+  .pg h4 { margin: 0 0 2px; font-size: 16px; letter-spacing: -.01em; }
+  .pg .sub { color: #6b7280; margin-bottom: 12px; }
+  .pg .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px; }
+  .pg .card { background: #fff; border: 1px solid #eceef1; border-radius: 8px; padding: 9px 10px; }
+  .pg .card b { display: block; font-size: 17px; letter-spacing: -.02em; margin-top: 2px; }
+  .pg .card small { color: #16a34a; }
+  .pg .chart { background: #fff; border: 1px solid #eceef1; border-radius: 8px; height: 112px; padding: 10px; display: flex; align-items: flex-end; gap: 7px; margin-bottom: 12px; }
+  .pg .chart i { flex: 1; background: #cfdcff; border-radius: 3px 3px 0 0; display: block; }
+  .pg .chart i.hi { background: #2f6bff; }
+  .pg .tbl { background: #fff; border: 1px solid #eceef1; border-radius: 8px; }
+  .pg .tr { display: flex; gap: 10px; padding: 7px 10px; border-top: 1px solid #f1f2f4; }
+  .pg .tr:first-child { border-top: 0; color: #6b7280; font-weight: 600; }
+  .pg .tr span:nth-child(1) { flex: 1.3; } .pg .tr span:nth-child(2) { flex: 2; } .pg .tr span:nth-child(3) { flex: .8; text-align: right; }
+  .pg .btn2 { display: inline-block; background: #2f6bff; color: #fff; border-radius: 6px; padding: 5px 10px; font-weight: 600; }
+
+  /* mosaic */
+  .mosaic { position: absolute; background-image:
+      linear-gradient(45deg, rgba(0,0,0,.08) 25%, transparent 25%, transparent 75%, rgba(0,0,0,.08) 75%),
+      linear-gradient(45deg, rgba(0,0,0,.08) 25%, transparent 25%, transparent 75%, rgba(0,0,0,.08) 75%);
+      background-color: #c9ccd3; background-size: 12px 12px; background-position: 0 0, 6px 6px; }
+
+  /* the capture overlay */
+  .region { position: absolute; outline: 1px solid #fff; }
+  .hd { position: absolute; width: 8px; height: 8px; background: #fff; border: 1px solid rgba(0,0,0,.5); border-radius: 2px; transform: translate(-50%,-50%); }
+  .nsmenu { position: absolute; width: 268px; padding: 5px; border-radius: 10px; background: rgba(40,41,46,.82); backdrop-filter: blur(30px);
+            border: 1px solid rgba(255,255,255,.14); box-shadow: 0 16px 50px rgba(0,0,0,.45); color: #f2f2f3; font-size: 13px; }
+  .nsmenu div { height: 22px; display: flex; align-items: center; padding: 0 10px 0 22px; border-radius: 5px; position: relative; }
+  .nsmenu hr { border: 0; border-top: 1px solid rgba(255,255,255,.12); margin: 5px 10px; }
+  .grip { color: var(--DIM); width: 16px; display: flex; justify-content: center; }
+
+  /* the capture, on this page */
+  .scene [hidden] { display: none !important; }
+  .scene .b, .scene .dot, .scene .sw, .scene .pill, .scene [data-fmt] { cursor: pointer; }
+  .scene .b:not(.on):not(.off):hover, .scene .dot:hover { background: var(--HOVER); }
+  .scene .pill:hover { opacity: .88; }
+  .nsmenu div[data-fmt]:hover { background: #2f6bff; }
+  #ov { position: fixed; inset: 0; z-index: 1000; cursor: crosshair; touch-action: none; }
+  #ov.move { cursor: move; }
+  #shade, #ink { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+  #mos { position: absolute; inset: 0; pointer-events: none; }
+  #mos div, .cvmos { position: absolute; backdrop-filter: blur(5px) saturate(.6); -webkit-backdrop-filter: blur(5px) saturate(.6);
+             background-image: linear-gradient(rgba(255,255,255,.06) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.06) 1px, transparent 1px); background-size: 8px 8px; }
+  #region { pointer-events: none; }
+  .hd { z-index: 2; }
+  .hd[data-h="nw"], .hd[data-h="se"] { cursor: nwse-resize; } .hd[data-h="ne"], .hd[data-h="sw"] { cursor: nesw-resize; }
+  .hd[data-h="n"], .hd[data-h="s"] { cursor: ns-resize; } .hd[data-h="e"], .hd[data-h="w"] { cursor: ew-resize; }
+  #ov .bar, #ov .nsmenu { z-index: 3; cursor: default; }
+  #ov .chip { font-family: "JetBrains Mono", ui-monospace, monospace; color: #fff; }
+  .pickhint { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); padding: 10px 16px; border-radius: 10px;
+              background: rgba(0,0,0,.65); color: #fff; font-size: 15px; pointer-events: none; white-space: nowrap; }
+  .pickhint:empty { display: none; }
+  .txt { position: absolute; border: 1px dashed rgba(127,127,127,.9); background: rgba(127,127,127,.12); outline: 0; padding: 0 2px;
+         font: 600 18px -apple-system, system-ui, sans-serif; min-width: 120px; z-index: 3; }
+  .toast { position: fixed; left: 50%; bottom: 70px; transform: translate(-50%, 20px); padding: 9px 16px; border-radius: 10px;
+           background: rgba(20,21,24,.94); border: 1px solid rgba(255,255,255,.15); color: #fff; font-size: 14px;
+           opacity: 0; transition: opacity .2s, transform .2s; pointer-events: none; z-index: 1100; white-space: nowrap; }
+  .toast.on { opacity: 1; transform: translate(-50%, 0); }
+  .flash { position: fixed; background: #fff; pointer-events: none; z-index: 1050; animation: flash .35s ease-out forwards; }
+  @keyframes flash { from { opacity: .85; } to { opacity: 0; } }
+  .row > div.new { animation: pop .8s ease-out; }
+  @keyframes pop { from { background: rgba(255,255,255,.45); } }
+  .hero-shot { padding: 0 0 56px; }
+  [data-window].lift { outline: 2px solid #2f6bff; outline-offset: 2px; }
+
+  @media (max-width: 720px) { .legend { font-size: 13px; } }
 </style>
 </head>
 <body>
@@ -78,20 +229,119 @@
     <a href="https://github.com/cuong95nddev/gannet">GitHub</a>
   </nav>
 
-  <header>
-    <img src="assets/icon.svg?v=2" alt="Gannet icon">
-    <h1>Spot it. Dive.<br>Captured.</h1>
-    <p class="lede">A fast, native screen capture tool that lives in the macOS menu bar.</p>
-    <a class="btn" href="https://github.com/cuong95nddev/gannet/releases/latest">Download for macOS</a>
-    <div class="meta">Free and open source · macOS 12.3+ · Apple Silicon and Intel</div>
+  <header data-window>
+    <h1>Spot it. Dive. Captured.</h1>
+    <p class="lede">Screen capture for the macOS menu bar.</p>
+    <div class="cta">
+      <a class="btn" href="https://github.com/cuong95nddev/gannet/releases/latest">Download for macOS</a>
+    </div>
   </header>
+
+  <!-- The app, and the page as a screen to capture -->
+  <div class="hero-shot" id="library">
+    <div class="wide">
+      <div class="shot"><div class="fit" data-w="1240" data-h="720" data-window><div class="scene">
+        <div class="win">
+          <div class="titlebar"><div class="lights"><i></i><i></i><i></i></div><span id="wtitle">Tue 10 Nov 2026, 09:41 · 1440 × 900</span></div>
+          <div class="stage">
+            <!-- capture tree -->
+            <div class="panel" style="left:10px;top:10px;bottom:10px;width:264px">
+              <div class="ptop"><span class="t">Captures</span><span class="b"><i data-lucide="folder-plus"></i></span><span class="b"><i data-lucide="layout-grid"></i></span></div>
+              <div class="tree s14">
+                <div class="fold"><span class="ic"><i data-lucide="chevron-down"></i></span><span class="ic"><i data-lucide="folder-open"></i></span>10 Nov 2026<span class="n" id="today-n">3</span></div>
+                <div class="row" id="today">
+                  <div class="cur" id="lib-cur"><span class="th"><span class="pg" data-page="thumb"></span></span><span class="tm">09:41:07</span></div>
+                  <div><span class="th" style="background:linear-gradient(135deg,#2a3350,#151a28)"><span style="position:absolute;left:10px;top:9px;width:52px;height:30px;background:#ececee;border-radius:3px"></span></span><span class="tm">09:12:44</span></div>
+                  <div><span class="th" style="background:#f3f4f6"><span style="position:absolute;left:8px;top:8px;right:8px;height:6px;background:#d1d5db;border-radius:2px"></span><span style="position:absolute;left:8px;top:20px;width:40px;height:6px;background:#e5e7eb;border-radius:2px"></span><span style="position:absolute;left:8px;top:32px;width:56px;height:6px;background:#e5e7eb;border-radius:2px"></span></span><span class="tm">08:57:30</span></div>
+                </div>
+                <div class="fold"><span class="ic"><i data-lucide="chevron-right"></i></span><span class="ic"><i data-lucide="folder"></i></span>9 Nov 2026<span class="n">12</span></div>
+                <div class="fold"><span class="ic"><i data-lucide="chevron-right"></i></span><span class="ic"><i data-lucide="folder"></i></span>Bug reports<span class="n">7</span></div>
+                <div class="fold"><span class="ic"><i data-lucide="chevron-right"></i></span><span class="ic"><i data-lucide="folder"></i></span>Design refs<span class="n">4</span></div>
+              </div>
+              <div class="trash s14"><div class="fold"><span class="ic"><i data-lucide="chevron-right"></i></span><span class="ic"><i data-lucide="trash-2"></i></span>Trash<span class="n">2</span></div></div>
+            </div>
+
+            <!-- toolbar -->
+            <div style="position:absolute;top:10px;left:274px;right:274px;display:flex;justify-content:center">
+              <div class="bar" id="libbar" style="position:relative;height:40px">
+                <span class="b" data-act="region" title="Capture Region (⌃⇧4)"><i data-lucide="scan"></i></span><span class="b" data-act="window" title="Capture Window (⌃⇧5)"><i data-lucide="app-window"></i></span><span class="b" data-act="screen" title="Capture Full Screen (⌃⇧3)"><i data-lucide="monitor"></i></span><span class="b" data-act="scroll" title="Capture Scrolling Region (⌃⇧6)"><i data-lucide="scroll-text"></i></span>
+                <span class="sep"></span>
+                <span class="b"><i data-lucide="folder-open"></i></span><span class="b"><i data-lucide="clipboard-paste"></i></span>
+                <span class="sep"></span>
+                <span class="b"><i data-lucide="square-dashed"></i></span><span class="b"><i data-lucide="crop"></i></span>
+                <span class="sep"></span>
+                <span class="b on" id="libtool"><i data-lucide="square"></i></span><span class="b"><i data-lucide="circle"></i></span><span class="b"><i data-lucide="minus"></i></span><span class="b"><i data-lucide="move-up-right"></i></span>
+                <span class="b"><i data-lucide="pencil"></i></span><span class="b"><i data-lucide="type"></i></span><span class="b"><i data-lucide="hash"></i></span><span class="b"><i data-lucide="grid-3x3"></i></span>
+                <span class="sep"></span>
+                <span class="b"><i data-lucide="undo-2"></i></span><span class="b off"><i data-lucide="redo-2"></i></span>
+                <span class="sep"></span>
+                <span class="b"><i data-lucide="trash-2"></i></span><span class="b"><i data-lucide="download"></i></span>
+                <span style="width:6px"></span><span class="pill">Copy</span>
+              </div>
+            </div>
+            <!-- style bar -->
+            <div id="libstyle" style="position:absolute;top:58px;left:274px;right:274px;display:flex;justify-content:center">
+              <div class="bar" style="position:relative;height:34px">
+                <span class="dot"><i style="width:4px;height:4px"></i></span><span class="dot"><i style="width:7px;height:7px"></i></span><span class="dot on"><i style="width:10px;height:10px"></i></span>
+                <span class="sep"></span>
+                <span data-swatches="1"></span>
+              </div>
+            </div>
+
+            <!-- the canvas -->
+            <div id="cv" style="position:absolute;left:330px;top:118px;width:580px;height:362px;box-shadow:0 10px 40px rgba(0,0,0,.5);overflow:hidden">
+              <div class="pg" data-page></div>
+              <div class="mosaic" style="left:146px;top:296px;width:190px;height:18px;border-radius:2px"></div>
+              <svg width="580" height="362" style="position:absolute;inset:0;overflow:visible;font-family:-apple-system,system-ui,sans-serif">
+                <defs><marker id="ah" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#E53935"/></marker></defs>
+                <!-- picked rectangle, with its handles -->
+                <rect x="402" y="132" width="164" height="70" rx="3" fill="none" stroke="#2F6BFF" stroke-width="4"/>
+                <g fill="#fff" stroke="#000" stroke-opacity=".5"><rect x="398" y="128" width="8" height="8" rx="2"/><rect x="562" y="128" width="8" height="8" rx="2"/><rect x="398" y="198" width="8" height="8" rx="2"/><rect x="562" y="198" width="8" height="8" rx="2"/></g>
+                <path d="M300 74 C 340 70, 372 98, 396 124" fill="none" stroke="#E53935" stroke-width="3.5" stroke-linecap="round" marker-end="url(#ah)"/>
+                <rect x="172" y="60" width="128" height="26" rx="4" fill="#E53935"/>
+                <text x="236" y="78" fill="#fff" font-size="13" font-weight="600" text-anchor="middle">Up 18% — why?</text>
+                <g><circle cx="402" cy="132" r="11" fill="#E53935"/><text x="402" y="136.5" fill="#fff" font-size="13" font-weight="700" text-anchor="middle">1</text></g>
+                <g><circle cx="150" cy="232" r="11" fill="#E53935"/><text x="150" y="236.5" fill="#fff" font-size="13" font-weight="700" text-anchor="middle">2</text></g>
+              </svg>
+            </div>
+            <!-- zoom + size -->
+            <div style="position:absolute;right:284px;bottom:10px;display:flex;gap:6px;align-items:center">
+              <span class="chip" style="position:static" id="cvsize">1440 × 900</span>
+              <div class="bar" style="position:relative;height:30px;padding:0 4px">
+                <span class="b" style="width:22px;height:22px"><i data-lucide="minus"></i></span><span style="font-size:12px;min-width:36px;text-align:center" id="zoom">40%</span><span class="b" style="width:22px;height:22px"><i data-lucide="plus"></i></span>
+              </div>
+            </div>
+
+            <!-- layers -->
+            <div class="panel" style="right:10px;top:10px;bottom:10px;width:264px">
+              <div class="ptop"><span class="t">Layers</span>
+                <span class="b"><i data-lucide="arrow-up"></i></span><span class="b"><i data-lucide="arrow-down"></i></span><span class="b"><i data-lucide="trash-2"></i></span><span class="b"><i data-lucide="x"></i></span>
+              </div>
+              <div class="layers s14" id="layerlist">
+                <div class="lr"><i data-lucide="hash"></i><span class="nm">Marker 2</span><span class="cd" style="background:#E53935"></span><span class="eye"><i data-lucide="eye"></i></span></div>
+                <div class="lr"><i data-lucide="hash"></i><span class="nm">Marker 1</span><span class="cd" style="background:#E53935"></span><span class="eye"><i data-lucide="eye"></i></span></div>
+                <div class="lr"><i data-lucide="type"></i><span class="nm">Up 18% — why?</span><span class="cd" style="background:#E53935"></span><span class="eye"><i data-lucide="eye"></i></span></div>
+                <div class="lr"><i data-lucide="move-up-right"></i><span class="nm">Arrow</span><span class="cd" style="background:#E53935"></span><span class="eye"><i data-lucide="eye"></i></span></div>
+                <div class="lr on"><i data-lucide="square"></i><span class="nm">Rectangle</span><span class="cd" style="background:#2F6BFF"></span><span class="eye"><i data-lucide="eye"></i></span></div>
+                <div class="lr"><i data-lucide="grid-3x3"></i><span class="nm">Mosaic</span><span class="cd" style="background:#7A7F87"></span><span class="eye"><i data-lucide="eye"></i></span></div>
+                <div class="lr" style="color:var(--DIM)"><i data-lucide="circle"></i><span class="nm">Ellipse</span><span class="cd" style="background:#3CB84A"></span><span class="eye"><i data-lucide="eye-off"></i></span></div>
+                <div class="lr"><i data-lucide="image"></i><span class="nm">Picture</span><span class="eye"><i data-lucide="lock"></i></span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div></div></div>
+      <p class="legend"><span><b>Captures</b> a folder per day, your own folders, a trash that empties itself</span><span><b>Layers</b> pick, restyle, hide, reorder</span><span><b>Canvas</b> crop or grow it from the edge</span></p>
+    </div>
+  </div>
 
   <section>
     <h2>Features</h2>
     <ul>
-      <li>Region, window or full screen, on a shortcut. The screen freezes the moment you press it.</li>
-      <li>Mark up with boxes, arrows, pen, text, numbered steps and mosaic.</li>
-      <li><kbd>Enter</kbd> copies the capture and saves it as a PNG.</li>
+      <li>Region, window, full screen or a scrolling region, on a shortcut. The screen freezes the moment you press it.</li>
+      <li>Mark up with boxes, ellipses, lines, arrows, pen, text, numbered steps and mosaic.</li>
+      <li><kbd>Enter</kbd> copies the capture and keeps it in the library; save as PNG, JPEG or BMP.</li>
+      <li>A library that keeps every capture encrypted on disk, in folders, with layers you can edit later.</li>
       <li>Your own shortcuts and save folder, in Settings.</li>
     </ul>
   </section>
@@ -103,7 +353,7 @@
       <li>Open it: it lives in the menu bar.</li>
       <li>Allow <b>Screen Recording</b> on the first capture.</li>
     </ol>
-    <pre><code>git clone https://github.com/cuong95nddev/gannet
+    <pre data-window><code>git clone https://github.com/cuong95nddev/gannet
 cd gannet && scripts/install.sh</code></pre>
   </section>
 
@@ -112,5 +362,419 @@ cd gannet && scripts/install.sh</code></pre>
     <span><a href="https://github.com/cuong95nddev/gannet">GitHub</a> · <a href="https://github.com/cuong95nddev/gannet/releases">Releases</a> · <a href="https://github.com/cuong95nddev/gannet/blob/main/ROADMAP.md">Roadmap</a></span>
   </footer>
 </main>
+
+<!-- Gannet's floating capture toolbar, on the page -->
+<div class="scene bar" id="floatbar" style="position:fixed;right:16px;bottom:16px;height:36px;padding:0 6px 0 2px;z-index:900">
+  <span class="grip s14"><i data-lucide="grip-vertical"></i></span>
+  <span class="b" data-act="region" title="Capture Region (⌃⇧4)"><i data-lucide="scan"></i></span><span class="b" data-act="window" title="Capture Window (⌃⇧5)"><i data-lucide="app-window"></i></span>
+  <span class="b" data-act="screen" title="Capture Full Screen (⌃⇧3)"><i data-lucide="monitor"></i></span><span class="b" data-act="scroll" title="Capture Scrolling Region (⌃⇧6)"><i data-lucide="scroll-text"></i></span>
+  <span class="sep"></span>
+  <span class="b" data-act="library" title="Open Library"><i data-lucide="images"></i></span><span class="b" data-act="hide" title="Hide"><i data-lucide="x"></i></span>
+</div>
+
+<!-- The frozen page, while capturing -->
+<div class="scene" id="ov" hidden>
+  <svg id="shade"><path fill="rgba(0,0,0,.45)" fill-rule="evenodd"/></svg>
+  <div id="mos"></div>
+  <svg id="ink"><g></g></svg>
+  <div class="region" id="region" hidden></div>
+  <div id="handles"></div>
+  <div class="chip" id="chip" hidden></div>
+  <div class="pickhint" id="pickhint"></div>
+  <div class="bar" id="tb" hidden style="height:36px">
+    <span class="b" data-tool="rect" title="Rectangle (R)"><i data-lucide="square"></i></span><span class="b" data-tool="ellipse" title="Ellipse (E)"><i data-lucide="circle"></i></span>
+    <span class="b" data-tool="line" title="Line (L)"><i data-lucide="minus"></i></span><span class="b" data-tool="arrow" title="Arrow (A)"><i data-lucide="move-up-right"></i></span>
+    <span class="b" data-tool="pen" title="Pen (P)"><i data-lucide="pencil"></i></span><span class="b" data-tool="text" title="Text (T)"><i data-lucide="type"></i></span>
+    <span class="b" data-tool="marker" title="Numbered marker (N)"><i data-lucide="hash"></i></span><span class="b" data-tool="mosaic" title="Mosaic (M)"><i data-lucide="grid-3x3"></i></span>
+    <span class="sep"></span>
+    <span class="b" data-cmd="undo" title="Undo (⌘Z)"><i data-lucide="undo-2"></i></span><span class="b" data-cmd="redo" title="Redo (⌘⇧Z)"><i data-lucide="redo-2"></i></span>
+    <span class="sep"></span>
+    <span class="b" data-cmd="cancel" title="Cancel (Esc)"><i data-lucide="x"></i></span><span class="b" data-cmd="save" title="Save to a file: PNG, JPEG or BMP"><i data-lucide="download"></i></span><span class="b" data-cmd="edit" title="Copy, and open in the editor (⌘E)"><i data-lucide="square-pen"></i></span>
+    <span style="width:4px"></span><span class="pill" data-cmd="copy" title="Copy, and keep in the library (Enter)">Copy</span>
+  </div>
+  <div class="bar" id="stb" hidden style="height:30px">
+    <span class="dot" data-size="0"><i style="width:4px;height:4px"></i></span><span class="dot" data-size="1"><i style="width:7px;height:7px"></i></span><span class="dot" data-size="2"><i style="width:10px;height:10px"></i></span>
+    <span class="sep"></span>
+    <span data-swatches="0"></span>
+  </div>
+  <div class="nsmenu" id="savemenu" hidden style="width:150px">
+    <div data-fmt="PNG">PNG</div><div data-fmt="JPEG">JPEG</div><div data-fmt="BMP">BMP</div>
+  </div>
+</div>
+<div class="scene toast" id="toast"></div>
+
+<!-- The made-up page that plays the screenshot, written once. -->
+<template id="page">
+  <div class="top"><span class="logo"></span><span class="lnk on">Overview</span><span class="lnk">Reports</span><span class="lnk">Customers</span><span class="lnk">Settings</span><span class="av"></span></div>
+  <div class="body">
+    <div class="nav"><span class="on">Dashboard</span><span>Revenue</span><span>Orders</span><span>Invoices</span><span>Team</span></div>
+    <div class="cont">
+      <h4>Revenue</h4><div class="sub">Last 30 days · updated 2 min ago</div>
+      <div class="cards">
+        <div class="card">Revenue<b>$48,210</b><small>▲ 18.2%</small></div>
+        <div class="card">Orders<b>1,284</b><small>▲ 4.1%</small></div>
+        <div class="card">Refunds<b>23</b><small style="color:#dc2626">▲ 2</small></div>
+      </div>
+      <div class="chart"><i style="height:30%"></i><i style="height:42%"></i><i style="height:38%"></i><i style="height:55%"></i><i style="height:48%"></i><i style="height:62%"></i><i style="height:58%"></i><i class="hi" style="height:92%"></i><i style="height:66%"></i><i style="height:70%"></i><i style="height:64%"></i><i style="height:76%"></i></div>
+      <div class="tbl">
+        <div class="tr"><span>Order</span><span>Customer</span><span>Total</span></div>
+        <div class="tr"><span>#10482</span><span>jamie.lee@example.com</span><span>$420.00</span></div>
+        <div class="tr"><span>#10481</span><span>Northwind Ltd.</span><span>$1,280.00</span></div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js" integrity="sha384-ieG+IKD0d/ZPXyCBTMVAbqsQdns8QGJR/e26WMw7M4fkaI/rHcS/YIoi+ah9WGge" crossorigin="anonymous"></script>
+<script>
+  // The made-up page, in every place that shows it.
+  const page = document.getElementById('page');
+  document.querySelectorAll('[data-page]').forEach(el => {
+    el.appendChild(page.content.cloneNode(true));
+    if (el.dataset.page === 'thumb') {
+      el.style.width = '580px'; el.style.height = '362px';
+      el.style.transform = 'scale(' + (84 / 580) + ')'; el.style.transformOrigin = '0 0';
+    }
+  });
+  // The eight markup colours (gannet-core COLORS); first one picked.
+  const COLORS = ['#E53935', '#2F6BFF', '#3CB84A', '#E0A42B', '#EC4C8B', '#1A1A1A', '#7A7F87', '#FFFFFF'];
+  document.querySelectorAll('[data-swatches]').forEach(el => {
+    const on = +el.dataset.swatches;
+    el.outerHTML = COLORS.map((c, i) => `<span class="sw${i === on ? ' on' : ''}"><i style="background:${c}"></i></span>`).join('');
+  });
+  if (window.lucide) lucide.createIcons();
+  // Scenes are drawn at the app's real pixel sizes, then scaled to fit.
+  function fit() {
+    document.querySelectorAll('.fit').forEach(f => {
+      const w = +f.dataset.w, h = +f.dataset.h, k = f.clientWidth / w;
+      f.style.height = h * k + 'px';
+      const s = f.firstElementChild;
+      s.style.width = w + 'px'; s.style.height = h + 'px'; s.style.transform = `scale(${k})`;
+    });
+  }
+  fit(); addEventListener('resize', fit);
+</script>
+<script>
+// Capture this page as Gannet captures a screen: freeze, pick, mark up, copy.
+(() => {
+  const NS = 'http://www.w3.org/2000/svg';
+  const $ = id => document.getElementById(id);
+  const ov = $('ov'), tb = $('tb'), stb = $('stb'), inkSvg = $('ink'), ink = inkSvg.querySelector('g');
+  const COLORS = ['#E53935', '#2F6BFF', '#3CB84A', '#E0A42B', '#EC4C8B', '#1A1A1A', '#7A7F87', '#FFFFFF'];
+  const STROKE = [2, 4, 7], MARK = [9, 11, 14], FONT = [14, 18, 26];
+  const KEYS = { r: 'rect', e: 'ellipse', l: 'line', a: 'arrow', p: 'pen', t: 'text', n: 'marker', m: 'mosaic' };
+  const NAMES = { rect: ['square', 'Rectangle'], ellipse: ['circle', 'Ellipse'], line: ['minus', 'Line'], arrow: ['move-up-right', 'Arrow'],
+                  pen: ['pencil', 'Pen'], text: ['type', 'Text'], marker: ['hash', 'Marker'], mosaic: ['grid-3x3', 'Mosaic'] };
+  const S = { phase: 'idle', mode: null, r: null, hover: null, tool: null, color: COLORS[0], size: 1,
+              shapes: [], undo: [], redo: [], drag: null, text: null, W: 0, H: 0 };
+
+  const pt = e => ({ x: e.clientX, y: e.clientY });
+  const norm = (a, b) => ({ x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) });
+  const inside = (p, r) => r && p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const rectOf = el => { const b = el.getBoundingClientRect(); return { x: b.left, y: b.top, w: b.width, h: b.height }; };
+
+  let toastT;
+  function toast(msg) { const t = $('toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), 2600); }
+
+  function start(mode) {
+    if (S.phase !== 'idle') close();
+    S.W = document.documentElement.clientWidth; S.H = window.innerHeight;
+    for (const svg of [$('shade'), inkSvg]) { svg.setAttribute('width', S.W); svg.setAttribute('height', S.H); }
+    Object.assign(S, { phase: 'pick', mode, r: null, hover: null, tool: null, shapes: [], undo: [], redo: [], drag: null });
+    if (mode === 'screen') { S.r = { x: 0, y: 0, w: S.W, h: S.H }; S.phase = 'edit'; }
+    document.documentElement.style.overflow = 'hidden'; // the screen is frozen
+    ov.hidden = false; $('floatbar').style.visibility = 'hidden'; $('savemenu').hidden = true;
+    render();
+  }
+  function close() {
+    cancelText();
+    S.phase = 'idle'; ov.hidden = true; $('savemenu').hidden = true;
+    document.documentElement.style.overflow = ''; $('floatbar').style.visibility = '';
+  }
+  function snap() { S.undo.push(JSON.stringify(S.shapes)); S.redo = []; }
+  function undo() { if (!S.undo.length) return; S.redo.push(JSON.stringify(S.shapes)); S.shapes = JSON.parse(S.undo.pop()); render(); }
+  function redo() { if (!S.redo.length) return; S.undo.push(JSON.stringify(S.shapes)); S.shapes = JSON.parse(S.redo.pop()); render(); }
+  function pick(tool) { commitText(); S.tool = S.tool === tool ? null : tool; render(); }
+
+  // ---- drawing ----
+  function el(tag, attrs) { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; }
+  function shapeEls(s) {
+    const sw = STROKE[s.size], c = s.color, base = { stroke: c, 'stroke-width': sw, fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' };
+    const r = norm(s.a, s.b);
+    switch (s.t) {
+      case 'rect': return [el('rect', { ...base, x: r.x, y: r.y, width: r.w, height: r.h, rx: 2 })];
+      case 'ellipse': return [el('ellipse', { ...base, cx: r.x + r.w / 2, cy: r.y + r.h / 2, rx: r.w / 2, ry: r.h / 2 })];
+      case 'line': return [el('line', { ...base, x1: s.a.x, y1: s.a.y, x2: s.b.x, y2: s.b.y })];
+      case 'arrow': {
+        const ang = Math.atan2(s.b.y - s.a.y, s.b.x - s.a.x), L = sw * 3 + 10, sp = 0.45;
+        const p1 = [s.b.x - L * Math.cos(ang - sp), s.b.y - L * Math.sin(ang - sp)], p2 = [s.b.x - L * Math.cos(ang + sp), s.b.y - L * Math.sin(ang + sp)];
+        const back = [s.b.x - L * 0.7 * Math.cos(ang), s.b.y - L * 0.7 * Math.sin(ang)];
+        return [el('line', { ...base, x1: s.a.x, y1: s.a.y, x2: back[0], y2: back[1] }),
+                el('polygon', { fill: c, stroke: c, 'stroke-width': 1, 'stroke-linejoin': 'round', points: `${s.b.x},${s.b.y} ${p1} ${p2}` })];
+      }
+      case 'pen': return [el('polyline', { ...base, points: s.pts.map(p => p.x + ',' + p.y).join(' ') })];
+      case 'marker': {
+        const R = MARK[s.size], t = el('text', { x: s.a.x, y: s.a.y + R * 0.38, fill: c === '#FFFFFF' ? '#000' : '#fff', 'font-size': R * 1.15,
+          'font-weight': 700, 'text-anchor': 'middle', 'font-family': '-apple-system,system-ui,sans-serif' });
+        t.textContent = s.n;
+        return [el('circle', { cx: s.a.x, cy: s.a.y, r: R, fill: c }), t];
+      }
+      case 'text': {
+        const t = el('text', { x: s.a.x, y: s.a.y + FONT[s.size] * 0.8, fill: c, 'font-size': FONT[s.size], 'font-weight': 600,
+          'font-family': '-apple-system,system-ui,sans-serif' });
+        t.textContent = s.text;
+        return [t];
+      }
+    }
+    return [];
+  }
+  // Shapes into an SVG group, mosaics into a box of divs; `cut` keeps mosaics inside it.
+  function drawShapes(g, mos, shapes, cut, mosClass) {
+    g.replaceChildren(); mos.replaceChildren();
+    for (const s of shapes) {
+      if (s.t === 'mosaic') {
+        let r = norm(s.a, s.b);
+        if (cut) { const x = Math.max(r.x, cut.x), y = Math.max(r.y, cut.y);
+          r = { x, y, w: Math.min(r.x + r.w, cut.x + cut.w) - x, h: Math.min(r.y + r.h, cut.y + cut.h) - y }; }
+        if (r.w <= 0 || r.h <= 0) continue;
+        const d = document.createElement('div'); if (mosClass) d.className = mosClass;
+        Object.assign(d.style, { left: r.x + 'px', top: r.y + 'px', width: r.w + 'px', height: r.h + 'px' });
+        mos.appendChild(d);
+      } else shapeEls(s).forEach(e => g.appendChild(e));
+    }
+  }
+
+  // ---- the overlay ----
+  function render() {
+    const { W, H } = S, r = S.r, hole = r || (S.mode === 'window' ? S.hover : null);
+    $('shade').firstElementChild.setAttribute('d', `M0 0H${W}V${H}H0Z` + (hole ? `M${hole.x} ${hole.y}h${hole.w}v${hole.h}h${-hole.w}Z` : ''));
+    const reg = $('region'), chip = $('chip');
+    reg.hidden = chip.hidden = !hole;
+    if (hole) {
+      Object.assign(reg.style, { left: hole.x + 'px', top: hole.y + 'px', width: hole.w + 'px', height: hole.h + 'px' });
+      chip.textContent = `${Math.round(hole.w)} × ${Math.round(hole.h)}`;
+      Object.assign(chip.style, { left: Math.max(hole.x, 4) + 'px', top: (hole.y > 26 ? hole.y - 26 : hole.y + 4) + 'px' });
+    }
+    $('pickhint').textContent = S.phase === 'pick' && !S.drag && !S.r
+      ? (S.mode === 'window' ? 'Click a window · Esc cancels' : S.mode === 'scroll' ? 'Drag the region to scroll through · Esc cancels' : 'Drag to pick a region · Esc cancels') : '';
+
+    const hs = $('handles'); hs.replaceChildren();
+    if (S.phase === 'edit' && r && !(r.w === W && r.h === H)) {
+      for (const [h, fx, fy] of [['nw',0,0],['n',.5,0],['ne',1,0],['e',1,.5],['se',1,1],['s',.5,1],['sw',0,1],['w',0,.5]]) {
+        const d = document.createElement('div'); d.className = 'hd'; d.dataset.h = h;
+        d.style.left = r.x + r.w * fx + 'px'; d.style.top = r.y + r.h * fy + 'px'; hs.appendChild(d);
+      }
+    }
+    inkSvg.style.clipPath = r ? `inset(${r.y}px ${W - r.x - r.w}px ${H - r.y - r.h}px ${r.x}px)` : '';
+    drawShapes(ink, $('mos'), S.shapes, r);
+
+    tb.hidden = S.phase !== 'edit';
+    stb.hidden = tb.hidden || !S.tool;
+    if (!tb.hidden) {
+      tb.querySelectorAll('[data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool === S.tool));
+      tb.querySelector('[data-cmd=undo]').classList.toggle('off', !S.undo.length);
+      tb.querySelector('[data-cmd=redo]').classList.toggle('off', !S.redo.length);
+      stb.querySelectorAll('[data-size]').forEach(b => b.classList.toggle('on', +b.dataset.size === S.size));
+      stb.querySelectorAll('.sw').forEach(b => b.classList.toggle('on', b.dataset.c === S.color));
+      const bw = tb.offsetWidth || 470, need = 44 + (S.tool ? 38 : 0);
+      let y = r.y + r.h + 8;
+      if (y + need > H - 4) y = r.y - need;
+      if (y < 4) y = r.y + r.h - need - 8; // no room outside: inside, at the bottom
+      const x = clamp(r.x + r.w - bw, 6, Math.max(6, W - bw - 6));
+      Object.assign(tb.style, { left: x + 'px', top: y + 'px' });
+      Object.assign(stb.style, { left: x + 'px', top: y + 44 + 'px' });
+    }
+  }
+
+  // ---- text ----
+  function beginText(p) {
+    const inp = document.createElement('input');
+    inp.className = 'txt'; inp.placeholder = 'Type, then Enter';
+    Object.assign(inp.style, { left: p.x + 'px', top: p.y + 'px', color: S.color, fontSize: FONT[S.size] + 'px', height: FONT[S.size] * 1.4 + 'px' });
+    ov.appendChild(inp);
+    S.text = { inp, a: p, color: S.color, size: S.size };
+    inp.focus();
+    inp.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') commitText(); if (e.key === 'Escape') cancelText(); });
+    inp.addEventListener('blur', () => setTimeout(commitText, 0));
+  }
+  function commitText() {
+    const t = S.text; if (!t) return; S.text = null;
+    if (t.inp.value.trim()) { snap(); S.shapes.push({ t: 'text', a: t.a, b: t.a, color: t.color, size: t.size, text: t.inp.value }); }
+    t.inp.remove(); render();
+  }
+  function cancelText() { if (S.text) { S.text.inp.remove(); S.text = null; } }
+
+  // ---- pointer ----
+  ov.addEventListener('pointerdown', e => {
+    if (e.target.closest('.bar, .nsmenu, .txt')) return;
+    $('savemenu').hidden = true;
+    if (S.text) { commitText(); return; }
+    const p = pt(e);
+    ov.setPointerCapture(e.pointerId);
+    if (e.target.dataset.h) { S.drag = { kind: 'resize', h: e.target.dataset.h, r0: { ...S.r }, p0: p }; return; }
+    if (S.phase === 'pick') {
+      if (S.mode === 'window') { if (S.hover) { S.r = { ...S.hover }; S.phase = 'edit'; render(); } return; }
+      S.drag = { kind: 'new', p0: p }; return;
+    }
+    if (S.tool && inside(p, S.r)) {
+      if (S.tool === 'text') { e.preventDefault(); beginText(p); return; }
+      if (S.tool === 'marker') { snap(); S.shapes.push({ t: 'marker', a: p, b: p, n: S.shapes.filter(s => s.t === 'marker').length + 1, color: S.color, size: S.size }); render(); return; }
+      const s = { t: S.tool, a: p, b: p, pts: [p], color: S.color, size: S.size };
+      S.drag = { kind: 'shape', s, before: JSON.stringify(S.shapes) }; S.shapes.push(s); return;
+    }
+    if (!S.tool && inside(p, S.r)) { S.drag = { kind: 'move', r0: { ...S.r }, p0: p }; return; }
+    if (!S.tool) S.drag = { kind: 'new', p0: p };
+  });
+  ov.addEventListener('pointermove', e => {
+    const p = pt(e), d = S.drag, { W, H } = S;
+    if (!d) {
+      if (S.phase === 'pick' && S.mode === 'window') {
+        const hit = [...document.querySelectorAll('[data-window]')].map(rectOf).filter(r => inside(p, r)).pop() || null;
+        if (JSON.stringify(hit) !== JSON.stringify(S.hover)) { S.hover = hit; render(); }
+      } else ov.classList.toggle('move', S.phase === 'edit' && !S.tool && inside(p, S.r));
+      return;
+    }
+    if (d.kind === 'new') {
+      S.r = norm(d.p0, { x: clamp(p.x, 0, W), y: clamp(p.y, 0, H) });
+      if (S.phase === 'edit') { S.phase = 'pick'; S.shapes = []; }
+    } else if (d.kind === 'move') {
+      const r = d.r0; S.r = { ...r, x: clamp(r.x + p.x - d.p0.x, 0, W - r.w), y: clamp(r.y + p.y - d.p0.y, 0, H - r.h) };
+    } else if (d.kind === 'resize') {
+      let { x, y, w, h } = d.r0, x2 = x + w, y2 = y + h; const dx = p.x - d.p0.x, dy = p.y - d.p0.y;
+      if (d.h.includes('w')) x += dx; if (d.h.includes('e')) x2 += dx; if (d.h.includes('n')) y += dy; if (d.h.includes('s')) y2 += dy;
+      S.r = norm({ x: clamp(x, 0, W), y: clamp(y, 0, H) }, { x: clamp(x2, 0, W), y: clamp(y2, 0, H) });
+    } else if (d.kind === 'shape') {
+      d.s.b = p; if (d.s.t === 'pen') d.s.pts.push(p);
+    }
+    render();
+  });
+  ov.addEventListener('pointerup', () => {
+    const d = S.drag; S.drag = null; if (!d) return;
+    if (d.kind === 'new') {
+      if (!S.r || S.r.w < 8 || S.r.h < 8) { S.r = null; S.phase = 'pick'; }
+      else { S.phase = 'edit'; S.undo = []; S.redo = []; S.shapes = []; }
+    } else if (d.kind === 'shape') {
+      const r = norm(d.s.a, d.s.b);
+      if (r.w < 3 && r.h < 3 && d.s.t !== 'pen') S.shapes.pop();
+      else { S.undo.push(d.before); S.redo = []; }
+    }
+    render();
+  });
+
+  // ---- buttons ----
+  tb.addEventListener('click', e => {
+    const t = e.target.closest('[data-tool]'); if (t) return pick(t.dataset.tool);
+    const c = e.target.closest('[data-cmd]'); if (!c) return;
+    ({ undo, redo, cancel: close, copy: () => copy(false), edit: () => copy(true),
+       save: () => { const m = $('savemenu'); m.hidden = !m.hidden;
+         Object.assign(m.style, { left: tb.offsetLeft + tb.offsetWidth - 210 + 'px', top: (tb.offsetTop > S.r.y ? tb.offsetTop + 40 : tb.offsetTop - 92) + 'px' }); } })[c.dataset.cmd]();
+  });
+  $('savemenu').addEventListener('click', e => { const f = e.target.closest('[data-fmt]'); if (!f) return;
+    $('savemenu').hidden = true; toast(`Saved as ${f.dataset.fmt}, in the app: to your save folder`); });
+  stb.addEventListener('click', e => {
+    const z = e.target.closest('[data-size]'), w = e.target.closest('.sw');
+    if (z) S.size = +z.dataset.size; if (w) S.color = w.dataset.c; render();
+  });
+  stb.querySelectorAll('.sw').forEach((b, i) => b.dataset.c = COLORS[i]);
+
+  // ---- a picture of the region: the page as it is, cloned, with the markup on top ----
+  function picture(r, shapes, k) {
+    const box = document.createElement('div');
+    Object.assign(box.style, { position: 'absolute', left: 0, top: 0, width: r.w * k + 'px', height: r.h * k + 'px', overflow: 'hidden',
+      background: getComputedStyle(document.body).backgroundColor });
+    const world = document.createElement('div');
+    Object.assign(world.style, { position: 'absolute', left: 0, top: 0, width: r.w + 'px', height: r.h + 'px', transformOrigin: '0 0', transform: `scale(${k})` });
+    const main = document.querySelector('main'), mr = main.getBoundingClientRect(), copyOf = main.cloneNode(true);
+    copyOf.querySelectorAll('[id]').forEach(n => n.removeAttribute('id'));
+    copyOf.querySelectorAll('[data-window], [data-act]').forEach(n => { n.removeAttribute('data-window'); n.removeAttribute('data-act'); });
+    Object.assign(copyOf.style, { position: 'absolute', margin: 0, left: mr.left - r.x + 'px', top: mr.top - r.y + 'px', width: mr.width + 'px' });
+    const mos = document.createElement('div'); mos.style.cssText = 'position:absolute;inset:0';
+    const svg = el('svg', { width: r.w, height: r.h, viewBox: `${r.x} ${r.y} ${r.w} ${r.h}` }); svg.style.cssText = 'position:absolute;left:0;top:0';
+    const g = el('g', {}); svg.appendChild(g);
+    drawShapes(g, mos, shapes, r, 'cvmos');
+    mos.querySelectorAll('div').forEach(d => { d.style.left = parseFloat(d.style.left) - r.x + 'px'; d.style.top = parseFloat(d.style.top) - r.y + 'px'; });
+    world.append(copyOf, mos, svg); box.appendChild(world);
+    return box;
+  }
+
+  // ---- copy: into the library window on the page, opened in its editor ----
+  function copy(scrollTo) {
+    commitText();
+    const r = { ...S.r }, shapes = S.shapes.slice(), f = document.createElement('div'); f.className = 'flash';
+    Object.assign(f.style, { left: r.x + 'px', top: r.y + 'px', width: r.w + 'px', height: r.h + 'px' });
+    const thumb = picture(r, shapes, Math.min(84 / r.w, 48 / r.h)), big = picture(r, shapes, 1);
+    document.body.appendChild(f); setTimeout(() => f.remove(), 400);
+    close();
+    addRow(thumb, r); openInEditor(big, r, shapes);
+    toast('Copied, and kept in the Library');
+    if (scrollTo) $('library').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+  function addRow(thumb, r) {
+    const k = Math.min(84 / r.w, 48 / r.h);
+    Object.assign(thumb.style, { left: (84 - r.w * k) / 2 + 'px', top: (48 - r.h * k) / 2 + 'px' });
+    const th = document.createElement('span'); th.className = 'th'; th.appendChild(thumb);
+    const row = document.createElement('div'); row.className = 'cur new';
+    const tm = document.createElement('span'); tm.className = 'tm'; tm.textContent = new Date().toTimeString().slice(0, 8);
+    row.append(th, tm);
+    const today = $('today'); today.querySelectorAll('.cur').forEach(d => d.classList.remove('cur'));
+    today.prepend(row);
+    $('today-n').textContent = today.children.length;
+  }
+  function openInEditor(big, r, shapes) {
+    // The stage between the panels: 284..956 across, 100..640 down, in the window's own pixels.
+    const k = Math.min(620 / r.w, 500 / r.h, 2), w = r.w * k, h = r.h * k, cv = $('cv');
+    big.style.transformOrigin = '0 0'; big.style.transform = `scale(${k})`;
+    Object.assign(cv.style, { width: w + 'px', height: h + 'px', left: 620 - w / 2 + 'px', top: 112 + (520 - h) / 2 + 'px' });
+    cv.replaceChildren(big);
+    const dpr = window.devicePixelRatio || 1, size = `${Math.round(r.w * dpr)} × ${Math.round(r.h * dpr)}`;
+    $('cvsize').textContent = size; $('zoom').textContent = Math.round(k * 100 / dpr) + '%';
+    const now = new Date();
+    $('wtitle').textContent = `${now.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }).replace(/,/g, '')}, ${now.toTimeString().slice(0, 5)} · ${size}`;
+    $('libtool').classList.remove('on'); $('libstyle').style.display = 'none';
+    const list = $('layerlist'); list.replaceChildren();
+    let m = 0;
+    const rows = shapes.map(s => {
+      const [ic, nm] = NAMES[s.t];
+      return { ic, nm: s.t === 'text' ? s.text : s.t === 'marker' ? `${nm} ${++m}` : nm, c: s.t === 'mosaic' ? '#7A7F87' : s.color };
+    }).reverse();
+    for (const l of rows) {
+      const d = document.createElement('div'); d.className = 'lr';
+      d.innerHTML = `<i data-lucide="${l.ic}"></i><span class="nm"></span><span class="cd" style="background:${l.c}"></span><span class="eye"><i data-lucide="eye"></i></span>`;
+      d.querySelector('.nm').textContent = l.nm; list.appendChild(d);
+    }
+    const pic = document.createElement('div'); pic.className = 'lr';
+    pic.innerHTML = '<i data-lucide="image"></i><span class="nm">Picture</span><span class="eye"><i data-lucide="lock"></i></span>';
+    list.appendChild(pic);
+    if (window.lucide) lucide.createIcons();
+  }
+
+  // ---- ways in ----
+  const acts = {
+    region: () => start('region'), window: () => start('window'), screen: () => start('screen'), scroll: () => start('scroll'),
+    library: () => $('library').scrollIntoView({ behavior: 'smooth', block: 'center' }),
+    hide: () => { $('floatbar').hidden = true; toast('Hidden. ⌃⇧4 still captures.'); },
+  };
+  document.addEventListener('click', e => {
+    if (e.target.closest('#ov')) return;
+    const a = e.target.closest('[data-act]'); if (a && acts[a.dataset.act]) acts[a.dataset.act]();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey) {
+      const m = { Digit3: 'screen', Digit4: 'region', Digit5: 'window', Digit6: 'scroll' }[e.code];
+      if (m) { e.preventDefault(); start(m); return; }
+    }
+    if (S.phase === 'idle' || S.text) return;
+    const mod = e.metaKey || e.ctrlKey, k = e.key.toLowerCase();
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    else if (S.phase !== 'edit') return;
+    else if (e.key === 'Enter' || (mod && k === 'c')) { e.preventDefault(); copy(false); }
+    else if (mod && k === 'e') { e.preventDefault(); copy(true); }
+    else if (mod && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+    else if (!mod && !e.altKey && KEYS[k]) { e.preventDefault(); pick(KEYS[k]); }
+  });
+  addEventListener('resize', () => { if (S.phase !== 'idle') close(); });
+})();
+</script>
 </body>
 </html>
