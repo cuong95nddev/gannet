@@ -17,6 +17,9 @@ use image::RgbaImage;
 
 /// The tallest picture kept, in pixels (about 190 MB at 1500 px wide).
 pub const MAX_HEIGHT: u32 = 32_000;
+/// The most memory the picture may take, whatever its width: a wide
+/// region stops short of [`MAX_HEIGHT`].
+const MAX_BYTES: usize = 256 << 20;
 
 /// Of the rows a shift is checked on, the share that must match.
 const MATCH: f32 = 0.95;
@@ -52,7 +55,14 @@ pub struct Stitcher {
 impl Stitcher {
     /// Start with the first frame, whole.
     pub fn new(first: RgbaImage) -> Self {
-        Self { width: first.width(), height: first.height(), rows: first.as_raw().clone(), last: first }
+        let mut rows = Vec::with_capacity(first.as_raw().len() * 4);
+        rows.extend_from_slice(first.as_raw());
+        Self { width: first.width(), height: first.height(), rows, last: first }
+    }
+
+    /// The tallest the picture may get, in pixels.
+    fn max_height(&self) -> usize {
+        (MAX_BYTES / self.row_bytes().max(1)).clamp(self.height as usize, MAX_HEIGHT as usize)
     }
 
     /// The picture's height so far, in pixels.
@@ -80,7 +90,8 @@ impl Stitcher {
         if m.dy == 0 {
             return Push::Same;
         }
-        if self.height() >= MAX_HEIGHT {
+        let max = self.max_height();
+        if self.height() as usize >= max {
             return Push::Full;
         }
         // Drop the old bottom rows, then add what scrolled in and the new
@@ -90,18 +101,24 @@ impl Stitcher {
         let keep = self.rows.len() - m.bottom * rb;
         self.rows.truncate(keep);
         let from = h - m.bottom - m.dy;
-        self.rows.extend_from_slice(&frame.as_raw()[from * rb..]);
-        let max = MAX_HEIGHT as usize * rb;
-        if self.rows.len() > max {
-            self.rows.truncate(max);
+        let add = &frame.as_raw()[from * rb..];
+        // Grown by half again, not doubled: no more than a third left over.
+        if self.rows.capacity() - self.rows.len() < add.len() {
+            let want = (self.rows.len() + add.len()).max(self.rows.len() * 3 / 2).min(max * rb);
+            self.rows.reserve_exact(want.saturating_sub(self.rows.len()));
+        }
+        self.rows.extend_from_slice(add);
+        if self.rows.len() > max * rb {
+            self.rows.truncate(max * rb);
         }
         self.last = frame;
         Push::Added(m.dy as u32)
     }
 
     /// The picture.
-    pub fn finish(self) -> RgbaImage {
+    pub fn finish(mut self) -> RgbaImage {
         let h = self.height();
+        self.rows.shrink_to_fit();
         RgbaImage::from_raw(self.width, h, self.rows).expect("whole rows")
     }
 }
@@ -184,18 +201,36 @@ fn find_shift(old: &Rows, new: &Rows) -> Option<Shift> {
     if end <= top + MIN_ROWS {
         return None;
     }
+    // How many rows that aren't blank `new` has before each row, so how
+    // many a shift is checked on is known before checking it.
+    let mut lit = vec![0usize; h + 1];
+    for y in 0..h {
+        lit[y + 1] = lit[y] + usize::from(!new.blank[y]);
+    }
     // The share of `new`'s rows, from `top` to `end - dy`, that match
-    // `old`'s `dy` rows further down.
+    // `old`'s `dy` rows further down. Given up as soon as too many miss
+    // for it to pass, so most shifts cost a few rows, not all of them.
     let score = |dy: usize| -> Option<usize> {
-        let (mut seen, mut hit) = (0, 0);
+        let seen = lit[end - dy] - lit[top];
+        if seen < MIN_ROWS {
+            return None;
+        }
+        let need = seen as f32 * MATCH;
+        let (mut miss, mut hit) = (0, 0);
         for y in top..end - dy {
             if new.blank[y] {
                 continue;
             }
-            seen += 1;
-            hit += usize::from(new.matches(y, old, y + dy));
+            if new.matches(y, old, y + dy) {
+                hit += 1;
+            } else {
+                miss += 1;
+                if ((seen - miss) as f32) < need {
+                    return None;
+                }
+            }
         }
-        (seen >= MIN_ROWS && hit as f32 >= seen as f32 * MATCH).then_some(hit)
+        (hit as f32 >= need).then_some(hit)
     };
     if score(0).is_some() {
         return Some(Shift { bottom, dy: 0 });

@@ -48,10 +48,31 @@ pub fn render(base: &RgbaImage, crop: Crop, doc: &Doc, font: Option<&FontVec>) -
 /// The layers of `doc` drawn on a blank `w` × `h` canvas, the bottom one
 /// first; `image` finds the pixels of an image layer by its number.
 pub fn compose<'a>(w: u32, h: u32, doc: &Doc, image: impl Fn(u32) -> Option<&'a RgbaImage>, font: Option<&FontVec>) -> RgbaImage {
-    let mut pm = Pixmap::new(w.max(1), h.max(1)).expect("non-empty pixmap");
-    let [r, g, b, a] = PAPER;
-    pm.fill(tiny_skia::Color::from_rgba8(r, g, b, a));
-    for shape in doc.visible() {
+    let mut shapes = doc.visible().peekable();
+    // Most often the bottom layer is the capture, covering the canvas
+    // exactly and opaque: it is the start, rather than paper drawn over.
+    let base = match shapes.peek() {
+        Some(Shape::Image { image: n, a, b }) => image(*n).filter(|img| {
+            *a == P::default()
+                && *b == model::p(w as f32, h as f32)
+                && img.dimensions() == (w, h)
+                && img.as_raw().as_chunks::<4>().0.iter().all(|px| px[3] == 255)
+        }),
+        _ => None,
+    };
+    let mut pm = match base {
+        Some(img) => {
+            shapes.next();
+            to_pixmap(img)
+        },
+        None => {
+            let mut pm = Pixmap::new(w.max(1), h.max(1)).expect("non-empty pixmap");
+            let [r, g, b, a] = PAPER;
+            pm.fill(tiny_skia::Color::from_rgba8(r, g, b, a));
+            pm
+        },
+    };
+    for shape in shapes {
         match shape {
             Shape::Image { image: n, a, b } => {
                 if let Some(img) = image(*n) {
@@ -81,8 +102,18 @@ fn draw_image(pm: &mut Pixmap, img: &RgbaImage, a: P, b: P) {
 /// `img` as a pixmap, its colours premultiplied.
 fn to_pixmap(img: &RgbaImage) -> Pixmap {
     let mut pm = Pixmap::new(img.width().max(1), img.height().max(1)).expect("non-empty pixmap");
+    // A screen capture is opaque all over: copied as it is, which is what
+    // premultiplying by 255 gives, without the sums.
+    if img.as_raw().as_chunks::<4>().0.iter().all(|px| px[3] == 255) {
+        pm.data_mut().copy_from_slice(img.as_raw());
+        return pm;
+    }
     for (dst, src) in pm.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(img.as_raw().as_chunks::<4>().0) {
         let a = u16::from(src[3]);
+        if a == 255 {
+            *dst = *src;
+            continue;
+        }
         for c in 0..3 {
             dst[c] = ((u16::from(src[c]) * a + 127) / 255) as u8;
         }
@@ -92,10 +123,14 @@ fn to_pixmap(img: &RgbaImage) -> Pixmap {
 }
 
 fn from_pixmap(pm: &Pixmap) -> RgbaImage {
-    let mut out = RgbaImage::new(pm.width(), pm.height());
+    // The pixmap's bytes are RGBA premultiplied: opaque pixels are already
+    // what the image wants.
+    let mut out = RgbaImage::from_raw(pm.width(), pm.height(), pm.data().to_vec()).expect("whole pixmap");
     for (dst, px) in out.as_chunks_mut::<4>().0.iter_mut().zip(pm.pixels()) {
-        let c = px.demultiply();
-        *dst = [c.red(), c.green(), c.blue(), c.alpha()];
+        if dst[3] != 255 {
+            let c = px.demultiply();
+            *dst = [c.red(), c.green(), c.blue(), c.alpha()];
+        }
     }
     out
 }
@@ -110,7 +145,7 @@ pub const PAPER: Rgba = [0xFF; 4];
 
 /// An image read from encoded bytes (a clipboard's).
 pub fn decode(bytes: &[u8]) -> Option<RgbaImage> {
-    image::load_from_memory(bytes).map(|i| i.to_rgba8()).map_err(|e| log::warn!("can't read the pasted image: {e}")).ok()
+    crate::store::decode(bytes).map_err(|e| log::warn!("can't read the pasted image: {e}")).ok()
 }
 
 fn clamp(c: Crop, w: u32, h: u32) -> Crop {
@@ -456,6 +491,23 @@ mod tests {
         assert_eq!(layer_at(&doc, p(50., 50.), 2., None), None, "hidden layers aren't found");
         let (lo, hi) = bounds(&doc.shapes[0], 1., None);
         assert_eq!((lo, hi), (p(9., 10. - 1.), p(91., 91.)));
+    }
+
+    #[test]
+    fn compose_on_an_opaque_capture_matches_drawing_it() {
+        let base = RgbaImage::from_fn(40, 30, |x, y| image::Rgba([(x * 6) as u8, (y * 8) as u8, 90, 255]));
+        let rect = Shape::Rect { a: model::p(5., 5.), b: model::p(30., 20.), style: model::Style::default() };
+        let mut doc = Doc::new(1.);
+        doc.push(Shape::Image { image: 0, a: P::default(), b: model::p(40., 30.) });
+        doc.push(rect.clone());
+        let fast = compose(40, 30, &doc, |_| Some(&base), None);
+        let mut marks = Doc::new(1.);
+        marks.push(rect);
+        assert_eq!(fast, flatten(&base, &marks, None));
+        // Not opaque: drawn over paper, as before.
+        let mut clear = base.clone();
+        clear.put_pixel(0, 0, image::Rgba([0, 0, 0, 0]));
+        assert_eq!(compose(40, 30, &doc, |_| Some(&clear), None).get_pixel(0, 0).0, PAPER);
     }
 
     #[test]

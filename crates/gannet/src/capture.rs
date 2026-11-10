@@ -1,6 +1,7 @@
 //! A capture from start to end: freeze every display, put the overlay on
 //! each, and deliver the result (clipboard, the library).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use gannet_core::{capture as grab, store};
@@ -8,7 +9,7 @@ use gpui_kit::*;
 use image::RgbaImage;
 
 use crate::overlay::Overlay;
-use crate::{library, prefs, scroll, toolbar};
+use crate::{library, paint, prefs, scroll, toolbar};
 
 /// What a capture takes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -24,9 +25,6 @@ pub enum Mode {
     Scroll,
 }
 
-/// Raw grabs are kept at most this long (they are deleted once read).
-const GRABS_KEEP: Duration = Duration::from_secs(3600);
-
 /// The capture on screen, if one is.
 #[derive(Default)]
 struct Capture {
@@ -35,13 +33,28 @@ struct Capture {
     /// from the library).
     hide_library: bool,
     overlays: Vec<AnyWindowHandle>,
+    /// The app in front when the capture started (not Gannet): it gets
+    /// the focus back after it, rather than the library window.
+    before: Option<objc2::rc::Retained<objc2_app_kit::NSRunningApplication>>,
 }
 
 impl Global for Capture {}
 
 pub fn init(cx: &mut App) {
     cx.set_global(Capture::default());
-    cx.background_executor().spawn(async { store::cleanup(&store::grabs_dir(), GRABS_KEEP) }).detach();
+    // Raw grabs are deleted once read; any still there were left by a
+    // crash, and are plain PNGs.
+    cx.background_executor()
+        .spawn(async {
+            store::cleanup(&store::grabs_dir(), Duration::ZERO);
+            grab::prepare();
+        })
+        .detach();
+    cx.on_app_quit(|_| {
+        store::cleanup(&store::grabs_dir(), Duration::ZERO);
+        async {}
+    })
+    .detach();
 }
 
 /// A capture asked for from the library, whose window is put away until
@@ -71,6 +84,7 @@ pub fn start(mode: Mode, cx: &mut App) {
         return;
     }
     cx.global_mut::<Capture>().on = true;
+    cx.global_mut::<Capture>().before = app_in_front();
     // Out of the way of the grab and of the window picker.
     let toolbar_away = toolbar::step_aside(cx);
     let library_away = hide_library && library::step_aside(cx);
@@ -88,8 +102,18 @@ const SETTLE: Duration = Duration::from_millis(120);
 /// library, if it stepped aside) come back.
 pub(crate) fn ended(cx: &mut App) {
     cx.global_mut::<Capture>().on = false;
+    if let Some(app) = cx.global_mut::<Capture>().before.take() {
+        app.activateWithOptions(objc2_app_kit::NSApplicationActivationOptions::empty());
+    }
     toolbar::come_back(cx);
     library::come_back(cx);
+}
+
+/// The app in front, unless it is Gannet.
+fn app_in_front() -> Option<objc2::rc::Retained<objc2_app_kit::NSRunningApplication>> {
+    use objc2_app_kit::{NSRunningApplication, NSWorkspace};
+    let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+    (app != NSRunningApplication::currentApplication()).then_some(app)
 }
 
 /// One display's frozen screen.
@@ -97,6 +121,9 @@ struct Grab {
     id: DisplayId,
     bounds: Bounds<Pixels>,
     image: Result<RgbaImage, String>,
+    /// The image as the overlay shows it, made beside the grab rather
+    /// than on the main thread.
+    picture: Option<Arc<RenderImage>>,
 }
 
 fn grab_displays(mode: Mode, settle: Duration, cx: &mut App) {
@@ -109,7 +136,13 @@ fn grab_displays(mode: Mode, settle: Duration, cx: &mut App) {
                 std::thread::scope(|s| {
                     let jobs: Vec<_> = displays
                         .into_iter()
-                        .map(|(id, bounds)| s.spawn(move || Grab { id, bounds, image: grab::grab_display(u64::from(id) as u32) }))
+                        .map(|(id, bounds)| {
+                            s.spawn(move || {
+                                let image = grab::grab_display(u64::from(id) as u32);
+                                let picture = (mode != Mode::Screen).then(|| image.as_ref().ok().map(paint::picture)).flatten();
+                                Grab { id, bounds, image, picture }
+                            })
+                        })
                         .collect();
                     jobs.into_iter().filter_map(|j| j.join().ok()).collect::<Vec<_>>()
                 })
@@ -158,7 +191,7 @@ fn pick_window(settle: Duration, cx: &mut App) {
 
 fn open_overlays(grabs: Vec<Grab>, mode: Mode, cx: &mut App) {
     let mut overlays: Vec<AnyWindowHandle> = Vec::new();
-    for Grab { id, bounds, image } in grabs {
+    for Grab { id, bounds, image, picture } in grabs {
         let img = match image {
             Ok(img) => img,
             Err(e) => {
@@ -182,7 +215,7 @@ fn open_overlays(grabs: Vec<Grab>, mode: Mode, cx: &mut App) {
                 ..Default::default()
             },
             cx,
-            |window, cx| cx.new(|cx| Overlay::new(img, size.width.as_f32(), mode == Mode::Scroll, window, cx)),
+            |window, cx| cx.new(|cx| Overlay::new(img, picture, size.width.as_f32(), mode == Mode::Scroll, window, cx)),
         );
         match opened {
             Ok((handle, _)) => {
@@ -271,11 +304,34 @@ fn remove_overlays(cx: &mut App) {
 /// opens in the editor whatever the setting (a capture taken without the
 /// overlay hasn't been marked up yet).
 pub fn deliver(img: RgbaImage, scale: f32, edit: bool, cx: &mut App) {
-    match store::png_bytes(&img) {
-        Ok(bytes) => cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, bytes))),
-        Err(e) => notify("Couldn't copy the capture", &e, cx),
-    }
-    library::keep(img, scale, edit, cx);
+    deliver_with(move || img, scale, edit, cx);
+}
+
+/// Like [`deliver`], with the capture still to be made by `make`: it is
+/// made and encoded off the main thread (a big one takes a while), and
+/// encoded once, for both the clipboard and the library.
+pub fn deliver_with(make: impl FnOnce() -> RgbaImage + Send + 'static, scale: f32, edit: bool, cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let (img, png) = cx
+            .background_executor()
+            .spawn(async move {
+                let img = make();
+                let png = store::png_bytes(&img);
+                (img, png)
+            })
+            .await;
+        cx.update(|cx| match png {
+            Ok(bytes) => {
+                cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, bytes.clone())));
+                library::keep_encoded(img, Some(bytes), scale, edit, cx);
+            },
+            Err(e) => {
+                notify("Couldn't copy the capture", &e, cx);
+                library::keep(img, scale, edit, cx);
+            },
+        });
+    })
+    .detach();
 }
 
 /// The main display's pixels per point.

@@ -1,8 +1,9 @@
 //! The capture library: every capture kept encrypted on disk until the user
 //! exports it. Each capture is two files, the image and a small thumbnail
 //! for the library's grid, both AES-256-GCM with a key the app keeps in
-//! the Keychain. A file is bound to its capture's id, so files can't be
-//! swapped between captures unnoticed.
+//! the Keychain. A file is bound to its capture's id and to what it is
+//! (image, thumbnail…), so files can't be swapped between captures, or a
+//! thumbnail put in place of an image, unnoticed.
 //!
 //! A capture edited keeps, beside it, its original (`.gorig`), the steps
 //! done to it (`.gedit`, see [`crate::edits`]) and the images pasted in
@@ -10,8 +11,13 @@
 //! after the app quits. The `.gcap` is then what the steps make of the
 //! original, for the grid, copying and exporting.
 //!
-//! File layout: `GNT1`, a 12-byte nonce, then the ciphertext of the
+//! File layout: `GNT2`, a 12-byte nonce, then the ciphertext of the
 //! capture's scale (f32, little endian: pixels per point) and its PNG.
+//! Files from before 0.3 start `GNT1`: their image and thumbnail are bound
+//! to the bare id. They are still read, and written anew as `GNT2`.
+//!
+//! The library's folder is the user's alone (0700), and so is each file
+//! in it (0600).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -27,7 +33,9 @@ use crate::folders::Folders;
 use crate::store;
 use crate::trash::{Trash, Trashed};
 
-const MAGIC: &[u8; 4] = b"GNT1";
+const MAGIC: &[u8; 4] = b"GNT2";
+/// Files sealed before each kind of file had its own binding.
+const MAGIC_V1: &[u8; 4] = b"GNT1";
 const NONCE: usize = 12;
 const IMAGE_EXT: &str = "gcap";
 const THUMB_EXT: &str = "gthumb";
@@ -118,22 +126,28 @@ impl Vault {
 
     /// Keep `img` (with `scale` pixels per point) as a new capture.
     pub fn add(&self, img: &RgbaImage, scale: f32) -> Result<Entry, String> {
+        self.add_encoded(img, &store::png_bytes(img)?, scale)
+    }
+
+    /// Keep `img` as a new capture, `png` being it already encoded (so a
+    /// capture also put on the clipboard is encoded once).
+    pub fn add_encoded(&self, img: &RgbaImage, png: &[u8], scale: f32) -> Result<Entry, String> {
         static N: AtomicU32 = AtomicU32::new(0);
         let ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
         let entry = Entry { id: format!("{ms}-{}", N.fetch_add(1, Ordering::Relaxed)), taken_ms: ms };
-        self.write(&entry.id, img, scale)?;
+        self.write(&entry.id, img, Some(png), scale)?;
         Ok(entry)
     }
 
     /// Put `img` in place of capture `id` (after it was edited).
     pub fn replace(&self, id: &str, img: &RgbaImage, scale: f32) -> Result<(), String> {
-        self.write(id, img, scale)
+        self.write(id, img, None, scale)
     }
 
     /// Capture `id` as taken, and the steps done to it.
     pub fn load_editable(&self, id: &str) -> Result<Editable, String> {
         let orig = self.path(id, ORIGINAL_EXT);
-        let original = if orig.exists() { self.open_from(&orig, id)? } else { self.load(id)? };
+        let original = if orig.exists() { self.open_from(&orig, &image_aad(id), id)? } else { self.load(id)? };
         let edits = match std::fs::read(self.path(id, EDITS_EXT)) {
             Ok(bytes) => Edits::from_json(&self.open(&format!("{id}/edits"), &bytes)?)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Edits::default(),
@@ -141,7 +155,8 @@ impl Vault {
         };
         let mut images = Images::new();
         for n in edits.images() {
-            match self.open_from(&self.paste_path(id, n), &format!("{id}/paste/{n}")) {
+            let aad = format!("{id}/paste/{n}");
+            match self.open_from(&self.paste_path(id, n), &aad, &aad) {
                 Ok(l) => {
                     images.insert(n, std::sync::Arc::new(l.image));
                 },
@@ -152,21 +167,31 @@ impl Vault {
     }
 
     /// Keep `edits` as what was done to capture `id`, with the pasted
-    /// `images` they use, and `img`, what they make of it, in its place.
-    /// The original is kept the first time.
-    pub fn save_edits(&self, id: &str, edits: &Edits, images: &Images, img: &RgbaImage, scale: f32) -> Result<(), String> {
+    /// `images` they use, and `img`, what they make of it, in its place
+    /// (`png`: it encoded, if it is already). The original is kept the
+    /// first time.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_edits(
+        &self,
+        id: &str,
+        edits: &Edits,
+        images: &Images,
+        img: &RgbaImage,
+        png: Option<&[u8]>,
+        scale: f32,
+    ) -> Result<(), String> {
         let orig = self.path(id, ORIGINAL_EXT);
         if !orig.exists() && !edits.is_empty() {
             // Copied, not moved: the capture is never missing its file.
-            let tmp = orig.with_extension("tmp");
-            std::fs::copy(self.path(id, IMAGE_EXT), &tmp).map_err(|e| e.to_string())?;
-            std::fs::rename(&tmp, &orig).map_err(|e| e.to_string())?;
+            // The original is the image as it was, bound alike.
+            let bytes = std::fs::read(self.path(id, IMAGE_EXT)).map_err(|e| e.to_string())?;
+            store::write_private(&orig, &bytes)?;
         }
         let used: Vec<u32> = edits.images().collect();
         for &n in &used {
             let path = self.paste_path(id, n);
             if let (false, Some(pasted)) = (path.exists(), images.get(&n)) {
-                self.seal_to(&path, &format!("{id}/paste/{n}"), pasted, scale)?;
+                self.seal_to(&path, &format!("{id}/paste/{n}"), pasted, None, scale)?;
             }
         }
         for n in self.paste_numbers(id).into_iter().filter(|n| !used.contains(n)) {
@@ -177,11 +202,10 @@ impl Vault {
             let _ = std::fs::remove_file(&edits_path);
         } else {
             let bytes = self.seal(&format!("{id}/edits"), &edits.to_json())?;
-            let tmp = edits_path.with_extension("tmp");
-            std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-            std::fs::rename(&tmp, &edits_path).map_err(|e| e.to_string())?;
+            self.ensure_dir()?;
+            store::write_private(&edits_path, &bytes)?;
         }
-        self.write(id, img, scale)?;
+        self.write(id, img, png, scale)?;
         if edits.is_empty() {
             let _ = std::fs::remove_file(&orig);
         }
@@ -200,14 +224,19 @@ impl Vault {
         self.dir.join(format!("{id}.{n}.{PASTE_EXT}"))
     }
 
-    fn write(&self, id: &str, img: &RgbaImage, scale: f32) -> Result<(), String> {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
-        // Only the user's own (the files are sealed anyway).
-        let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700));
+    /// The image and thumbnail of capture `id`; `png` is `img` encoded,
+    /// if it already is.
+    fn write(&self, id: &str, img: &RgbaImage, png: Option<&[u8]>, scale: f32) -> Result<(), String> {
         let thumb = thumbnail(img);
-        self.seal_to(&self.path(id, THUMB_EXT), id, &thumb, scale)?;
-        self.seal_to(&self.path(id, IMAGE_EXT), id, img, scale)
+        self.seal_to(&self.path(id, THUMB_EXT), &thumb_aad(id), &thumb, None, scale)?;
+        self.seal_to(&self.path(id, IMAGE_EXT), &image_aad(id), img, png, scale)
+    }
+
+    /// Make the library's folder if it isn't there, the user's alone
+    /// (the files are sealed anyway, but their names tell when each
+    /// capture was taken).
+    fn ensure_dir(&self) -> Result<(), String> {
+        store::private_dir(&self.dir)
     }
 
     /// The captures, newest first. Reads no file, only their names.
@@ -228,11 +257,11 @@ impl Vault {
     }
 
     pub fn load(&self, id: &str) -> Result<Loaded, String> {
-        self.open_from(&self.path(id, IMAGE_EXT), id)
+        self.open_from(&self.path(id, IMAGE_EXT), &image_aad(id), id)
     }
 
     pub fn thumb(&self, id: &str) -> Result<Loaded, String> {
-        self.open_from(&self.path(id, THUMB_EXT), id)
+        self.open_from(&self.path(id, THUMB_EXT), &thumb_aad(id), id)
     }
 
     /// The folders captures are sorted into; none before the first.
@@ -298,12 +327,9 @@ impl Vault {
     }
 
     fn write_meta(&self, file: &str, id: &str, plain: &[u8]) -> Result<(), String> {
-        std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
+        self.ensure_dir()?;
         let bytes = self.seal(id, plain)?;
-        let path = self.dir.join(file);
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+        store::write_private(&self.dir.join(file), &bytes)
     }
 
     /// Delete capture `id` for good; one already gone is no error.
@@ -330,22 +356,26 @@ impl Vault {
         self.dir.join(format!("{id}.{ext}"))
     }
 
-    fn seal_to(&self, path: &Path, id: &str, img: &RgbaImage, scale: f32) -> Result<(), String> {
+    /// Seal `img` (or `png`, it encoded already) into `path`, bound to `aad`.
+    fn seal_to(&self, path: &Path, aad: &str, img: &RgbaImage, png: Option<&[u8]>, scale: f32) -> Result<(), String> {
         let mut plain = scale.to_le_bytes().to_vec();
-        plain.extend(store::png_bytes(img)?);
-        let bytes = self.seal(id, &plain)?;
-        // Through a temporary file, so a crash never leaves half a capture.
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+        match png {
+            Some(png) => plain.extend_from_slice(png),
+            None => plain.extend(store::png_bytes(img)?),
+        }
+        let bytes = self.seal(aad, &plain)?;
+        self.ensure_dir()?;
+        store::write_private(path, &bytes)
     }
 
-    fn open_from(&self, path: &Path, id: &str) -> Result<Loaded, String> {
+    /// The capture in `path`, bound to `aad`; a file from before 0.3 is
+    /// bound to `v1_aad`.
+    fn open_from(&self, path: &Path, aad: &str, v1_aad: &str) -> Result<Loaded, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let plain = self.open(id, &bytes)?;
+        let plain = if bytes.starts_with(MAGIC_V1) { self.open(v1_aad, &bytes)? } else { self.open(aad, &bytes)? };
         let (scale, png) = plain.split_at_checked(4).ok_or("capture too short")?;
         let scale = f32::from_le_bytes(scale.try_into().map_err(|_| "capture too short")?);
-        let image = image::load_from_memory(png).map_err(|e| format!("can't read the capture: {e}"))?.to_rgba8();
+        let image = store::decode(png).map_err(|e| format!("can't read the capture: {e}"))?;
         Ok(Loaded { image, scale: if scale.is_finite() && scale > 0. { scale } else { 1. } })
     }
 
@@ -360,7 +390,7 @@ impl Vault {
     }
 
     fn open(&self, id: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
-        let rest = bytes.strip_prefix(MAGIC).ok_or("not a Gannet capture")?;
+        let rest = bytes.strip_prefix(MAGIC).or_else(|| bytes.strip_prefix(MAGIC_V1)).ok_or("not a Gannet capture")?;
         let (nonce, ct) = rest.split_at_checked(NONCE).ok_or("capture too short")?;
         self.cipher
             .decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad: id.as_bytes() })
@@ -379,6 +409,16 @@ pub fn export_path(dir: &Path, entry: &Entry) -> PathBuf {
         n += 1;
     }
     path
+}
+
+/// What a capture's image (and its original) is bound to.
+fn image_aad(id: &str) -> String {
+    format!("{id}/image")
+}
+
+/// What a capture's thumbnail is bound to.
+fn thumb_aad(id: &str) -> String {
+    format!("{id}/thumb")
 }
 
 fn parse_id(id: &str) -> Option<Entry> {
@@ -499,6 +539,62 @@ mod tests {
     }
 
     #[test]
+    fn a_thumbnail_cant_stand_in_for_the_image() {
+        let v = vault("kinds");
+        let img = RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]));
+        let a = v.add(&img, 1.).unwrap();
+        std::fs::copy(v.dir().join(format!("{}.gthumb", a.id)), v.dir().join(format!("{}.gcap", a.id))).unwrap();
+        assert!(v.load(&a.id).is_err());
+        let _ = std::fs::remove_dir_all(v.dir());
+    }
+
+    #[test]
+    fn reads_captures_from_before_kinds_were_bound() {
+        let v = vault("v1");
+        let img = RgbaImage::from_pixel(3, 2, image::Rgba([4, 5, 6, 255]));
+        let id = "1794205852021-0";
+        // As 0.2 wrote them: `GNT1`, image and thumbnail bound to the bare id.
+        let mut plain = 2f32.to_le_bytes().to_vec();
+        plain.extend(store::png_bytes(&img).unwrap());
+        let mut sealed = v.seal(id, &plain).unwrap();
+        sealed[..4].copy_from_slice(MAGIC_V1);
+        store::private_dir(v.dir()).unwrap();
+        for ext in [IMAGE_EXT, THUMB_EXT] {
+            std::fs::write(v.dir().join(format!("{id}.{ext}")), &sealed).unwrap();
+        }
+        let back = v.load(id).unwrap();
+        assert_eq!((back.image, back.scale), (img.clone(), 2.));
+        assert_eq!(v.thumb(id).unwrap().image, img);
+        assert_eq!(v.load_editable(id).unwrap().original.image, img);
+        // Edited, it keeps the old file as its original, still read.
+        let mut edits = Edits::default();
+        edits.push(crate::edits::Op::Crop { x: 0, y: 0, w: 1, h: 1 });
+        let small = RgbaImage::from_pixel(1, 1, image::Rgba([4, 5, 6, 255]));
+        v.save_edits(id, &edits, &Images::new(), &small, None, 2.).unwrap();
+        assert_eq!(v.load_editable(id).unwrap().original.image, img);
+        assert_eq!(v.load(id).unwrap().image, small);
+        let _ = std::fs::remove_dir_all(v.dir());
+    }
+
+    #[test]
+    fn the_library_is_the_users_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let v = vault("perms");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        // Folders saved before any capture still make the folder private.
+        v.save_folders(&Folders::default()).unwrap();
+        assert_eq!(mode(v.dir()), 0o700);
+        let img = RgbaImage::from_pixel(2, 2, image::Rgba([1, 1, 1, 255]));
+        let a = v.add(&img, 1.).unwrap();
+        for f in std::fs::read_dir(v.dir()).unwrap().flatten() {
+            assert_eq!(mode(&f.path()), 0o600, "{:?}", f.file_name());
+            assert!(!f.file_name().to_string_lossy().ends_with(".tmp"), "no temporary file left");
+        }
+        assert!(v.dir().join(format!("{}.gthumb", a.id)).exists());
+        let _ = std::fs::remove_dir_all(v.dir());
+    }
+
+    #[test]
     fn lists_replaces_and_deletes() {
         let v = vault("list");
         assert!(v.list().is_empty());
@@ -532,7 +628,7 @@ mod tests {
         let mut images = Images::new();
         images.insert(0, std::sync::Arc::new(px(7)));
         images.insert(1, std::sync::Arc::new(px(8)));
-        v.save_edits(&a.id, &edits, &images, &px(3), 2.).unwrap();
+        v.save_edits(&a.id, &edits, &images, &px(3), None, 2.).unwrap();
         assert_eq!(v.load(&a.id).unwrap().image, px(3), "the capture is what the edits make");
         assert_eq!(v.thumb(&a.id).unwrap().image, px(3));
         let e = v.load_editable(&a.id).unwrap();
@@ -544,11 +640,11 @@ mod tests {
         assert!(v.load_editable(&other.id).unwrap().edits.is_empty());
 
         // Saved again later: still the first original.
-        v.save_edits(&a.id, &edits, &e.images, &px(4), 2.).unwrap();
+        v.save_edits(&a.id, &edits, &e.images, &px(4), None, 2.).unwrap();
         assert_eq!(v.load_editable(&a.id).unwrap().original.image, px(1));
 
         // Every step gone: back to a plain capture.
-        v.save_edits(&a.id, &Edits::default(), &Images::new(), &px(1), 2.).unwrap();
+        v.save_edits(&a.id, &Edits::default(), &Images::new(), &px(1), None, 2.).unwrap();
         let names = |v: &Vault| -> Vec<String> {
             let mut n: Vec<_> = std::fs::read_dir(v.dir()).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).collect();
             n.sort();
@@ -557,7 +653,7 @@ mod tests {
         assert_eq!(names(&v).iter().filter(|n| n.starts_with(&a.id)).count(), 2, "{:?}", names(&v));
 
         // Deleting takes everything with it.
-        v.save_edits(&a.id, &edits, &images, &px(3), 2.).unwrap();
+        v.save_edits(&a.id, &edits, &images, &px(3), None, 2.).unwrap();
         v.delete(&a.id).unwrap();
         assert!(names(&v).iter().all(|n| !n.starts_with(&a.id)), "{:?}", names(&v));
         let _ = std::fs::remove_dir_all(v.dir());

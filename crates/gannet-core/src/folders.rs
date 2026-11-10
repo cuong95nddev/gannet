@@ -2,7 +2,7 @@
 //! Every capture is in one: a new one goes in the folder named for the day
 //! it was taken (made if there is none), and can be moved from there.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -17,13 +17,38 @@ pub struct Folder {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Folders {
     pub list: Vec<Folder>,
+    /// Goes up on every change made through these methods, so a view can
+    /// tell its layout of them is still right without comparing them all.
+    #[serde(skip)]
+    rev: Rev,
+}
+
+/// A count of changes, never part of what folders are: two lists of the
+/// same folders are equal whatever their counts.
+#[derive(Debug, Clone, Copy, Default)]
+struct Rev(u64);
+
+impl PartialEq for Rev {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 impl Folders {
+    /// How many changes have been made (see `rev`).
+    pub fn rev(&self) -> u64 {
+        self.rev.0
+    }
+
+    fn changed(&mut self) {
+        self.rev.0 += 1;
+    }
+
     /// A new, empty folder at the top; its id.
     pub fn add(&mut self, name: &str) -> u64 {
         let id = self.list.iter().map(|f| f.id).max().map_or(1, |n| n + 1);
         self.list.insert(0, Folder { id, name: name.to_owned(), captures: Vec::new() });
+        self.changed();
         id
     }
 
@@ -45,6 +70,7 @@ impl Folders {
         match self.list.iter_mut().find(|f| f.id == id) {
             Some(f) if !name.is_empty() && f.name != name => {
                 f.name = name.to_owned();
+                self.rev.0 += 1;
                 true
             },
             _ => false,
@@ -55,6 +81,7 @@ impl Folders {
     /// deleted with it (or filed by day again).
     pub fn remove(&mut self, id: u64) {
         self.list.retain(|f| f.id != id);
+        self.changed();
     }
 
     pub fn get(&self, id: u64) -> Option<&Folder> {
@@ -64,6 +91,40 @@ impl Folders {
     /// The folder capture `id` is in.
     pub fn folder_of(&self, capture: &str) -> Option<u64> {
         self.list.iter().find(|f| f.captures.iter().any(|c| c == capture)).map(|f| f.id)
+    }
+
+    /// Every capture filed, with the folder it is in: for looking many up
+    /// at once, where [`Self::folder_of`] would scan for each.
+    pub fn index(&self) -> HashMap<&str, u64> {
+        self.list.iter().flat_map(|f| f.captures.iter().map(move |c| (c.as_str(), f.id))).collect()
+    }
+
+    /// [`Self::file`] each of `captures` (id, day) in turn, in one pass.
+    /// Whether any was filed.
+    pub fn file_all<'a>(&mut self, captures: impl IntoIterator<Item = (&'a str, String)>) -> bool {
+        let filed: HashSet<String> = self.list.iter().flat_map(|f| f.captures.iter().cloned()).collect();
+        let mut changed = false;
+        for (capture, day) in captures {
+            if filed.contains(capture) {
+                continue;
+            }
+            let at = match self.list.iter().position(|f| f.name == day) {
+                Some(i) => i,
+                None => {
+                    self.add(&day);
+                    0
+                },
+            };
+            let f = &mut self.list[at];
+            if !f.captures.iter().any(|c| c == capture) {
+                f.captures.insert(0, capture.to_owned());
+                changed = true;
+            }
+        }
+        if changed {
+            self.changed();
+        }
+        changed
     }
 
     /// Put capture `capture` in folder `to`, or in none; out of any other.
@@ -78,6 +139,7 @@ impl Folders {
         if let Some(f) = to.and_then(|id| self.list.iter_mut().find(|f| f.id == id)) {
             f.captures.insert(0, capture.to_owned());
         }
+        self.changed();
         true
     }
 
@@ -101,6 +163,9 @@ impl Folders {
             let before = f.captures.len();
             f.captures.retain(|c| ids.contains(c.as_str()));
             changed |= f.captures.len() != before;
+        }
+        if changed {
+            self.changed();
         }
         changed
     }
@@ -170,5 +235,24 @@ mod tests {
         assert_eq!(f.get(a).unwrap().captures, vec!["c2".to_owned()]);
         assert_eq!(Folders::from_json(&f.to_json()).unwrap(), f);
         assert!(Folders::from_json(b"nope").is_err());
+    }
+
+    #[test]
+    fn file_all_matches_file_one_by_one() {
+        let mut one = Folders::default();
+        one.add("Work");
+        one.put("a", Some(1));
+        let mut all = one.clone();
+        let items = [("b", "Mon".to_owned()), ("a", "Tue".to_owned()), ("c", "Tue".to_owned()), ("d", "Mon".to_owned())];
+        for (id, day) in &items {
+            one.file(id, day);
+        }
+        assert!(all.file_all(items.iter().map(|(id, d)| (*id, d.clone()))));
+        assert_eq!(all, one);
+        assert!(!all.file_all(items.iter().map(|(id, d)| (*id, d.clone()))), "all filed already");
+        let index = all.index();
+        assert_eq!(index.len(), 4);
+        assert_eq!(index.get("a"), Some(&1));
+        assert_eq!(all.folder_of("d"), index.get("d").copied());
     }
 }

@@ -9,6 +9,7 @@
 //! delete.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -56,6 +57,12 @@ const PAD: f32 = 24.;
 /// A grid card's width; its picture keeps the capture's shape.
 const CARD_W: f32 = 240.;
 const CARD_PIC_H: f32 = 150.;
+/// The room between cards in the grid, across and down.
+const CARD_GAP: f32 = 12.;
+/// How many thumbnails are kept decoded; those not shown lately go first.
+const THUMBS_KEPT: usize = 240;
+/// How many thumbnails are read before they are shown, together.
+const THUMB_BATCH: usize = 12;
 /// Zoom limits, in window points per image pixel.
 const MIN_K: f32 = 0.02;
 const MAX_K: f32 = 32.;
@@ -82,8 +89,6 @@ const KEYCHAIN_SERVICE: &str = "dev.gannet";
 const KEYCHAIN_ACCOUNT: &str = "library-key";
 const KEY_CONTEXT: &str = "GannetLibrary";
 
-gpui_kit::actions!(gannet_library, [CloseLibrary]);
-
 /// The library, opened on first use (the Keychain may ask first, so never
 /// on the main thread).
 pub fn vault() -> Result<Arc<Vault>, String> {
@@ -93,7 +98,7 @@ pub fn vault() -> Result<Arc<Vault>, String> {
 
 #[cfg(not(debug_assertions))]
 fn open_vault() -> Result<Arc<Vault>, String> {
-    key().map(|k| Arc::new(Vault::new(vault::library_dir(), &k)))
+    key().map(|k| Arc::new(Vault::new(vault::library_dir(), &zeroize::Zeroizing::new(k))))
 }
 
 /// Debug builds keep a library of their own, with its key in a file: the
@@ -102,7 +107,7 @@ fn open_vault() -> Result<Arc<Vault>, String> {
 #[cfg(debug_assertions)]
 fn open_vault() -> Result<Arc<Vault>, String> {
     let dir = vault::library_dir().with_file_name("library-dev");
-    let key = vault::file_key(&dir.join("dev.key"))?;
+    let key = zeroize::Zeroizing::new(vault::file_key(&dir.join("dev.key"))?);
     Ok(Arc::new(Vault::new(dir, &key)))
 }
 
@@ -112,7 +117,11 @@ fn key() -> Result<[u8; 32], String> {
     use security_framework::passwords::{get_generic_password, set_generic_password};
     const NOT_FOUND: i32 = -25300; // errSecItemNotFound
     match get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
-        Ok(bytes) => bytes.try_into().map_err(|_| "the library key in the Keychain is damaged".to_owned()),
+        Ok(bytes) => {
+            // Wiped once copied out, like every copy of the key.
+            let bytes = zeroize::Zeroizing::new(bytes);
+            <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| "the library key in the Keychain is damaged".to_owned())
+        },
         Err(e) if e.code() == NOT_FOUND => {
             let k = vault::new_key();
             set_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, &k).map_err(|e| format!("can't keep the library key: {e}"))?;
@@ -122,8 +131,35 @@ fn key() -> Result<[u8; 32], String> {
     }
 }
 
+/// The private folder captures copied together go in, as plain PNGs.
+fn copied_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("gannet-copied")
+}
+
+/// Delete the captures copied as files: they are decrypted, and outlive
+/// the library's own files otherwise.
+fn forget_copied() {
+    let _ = std::fs::remove_dir_all(copied_dir());
+}
+
+/// How often the clipboard is looked at while copied files lie around.
+const COPIED_CHECK: Duration = Duration::from_secs(20);
+
+/// The pasteboard's change count, which goes up whenever anything is put
+/// on it.
+fn pasteboard_count() -> isize {
+    objc2_app_kit::NSPasteboard::generalPasteboard().changeCount()
+}
+
 /// Start dropping captures older than the settings keep, now and hourly.
 pub fn init(cx: &mut App) {
+    // Files from a copy before a crash, or before the last quit.
+    cx.background_executor().spawn(async { forget_copied() }).detach();
+    cx.on_app_quit(|_| {
+        forget_copied();
+        async {}
+    })
+    .detach();
     cx.spawn(async move |cx| {
         loop {
             let days = cx.update(|cx| prefs::get(cx).keep_days);
@@ -162,8 +198,22 @@ pub fn init(cx: &mut App) {
 /// Keep `img` (`scale` pixels per point) in the library, and open it in
 /// the editor with `edit` or if the settings say so.
 pub fn keep(img: RgbaImage, scale: f32, edit: bool, cx: &mut App) {
+    keep_encoded(img, None, scale, edit, cx);
+}
+
+/// Like [`keep`], `png` being the image already encoded, if it is.
+pub fn keep_encoded(img: RgbaImage, png: Option<Vec<u8>>, scale: f32, edit: bool, cx: &mut App) {
     cx.spawn(async move |cx| {
-        let added = cx.background_executor().spawn(async move { vault()?.add(&img, scale) }).await;
+        let added = cx
+            .background_executor()
+            .spawn(async move {
+                let v = vault()?;
+                match png {
+                    Some(png) => v.add_encoded(&img, &png, scale),
+                    None => v.add(&img, scale),
+                }
+            })
+            .await;
         cx.update(|cx| match added {
             Ok(e) => {
                 log::info!("kept capture {}", e.id);
@@ -243,14 +293,14 @@ pub fn open(cx: &mut App) {
 
 /// Show the library window, opening it if it isn't open.
 fn show_window(cx: &mut App) -> Option<Shown> {
+    // A regular app before it is active, or the menu bar keeps the menus
+    // of the app before.
+    dock::set(dock::Window::Library, true, cx);
     cx.activate(true);
     if let Some(shown) = cx.try_global::<Open>().and_then(|o| o.0.clone())
         && shown.update(cx, |_, window, _| window.activate_window()).is_some()
     {
         return Some(shown);
-    }
-    if !cx.has_global::<Open>() {
-        cx.bind_keys([KeyBinding::new("cmd-w", CloseLibrary, Some(KEY_CONTEXT))]);
     }
     let display = cx.primary_display()?;
     let options = WindowOptions {
@@ -308,8 +358,8 @@ pub fn open_files(cx: &mut App) {
                 let mut last = None;
                 let mut failed = Vec::new();
                 for path in &paths {
-                    match image::open(path) {
-                        Ok(img) => last = Some(v.add(&img.to_rgba8(), scale)?),
+                    match store::open(path) {
+                        Ok(img) => last = Some(v.add(&img, scale)?),
                         Err(_) => failed.push(path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())),
                     }
                 }
@@ -335,8 +385,16 @@ pub fn open_files(cx: &mut App) {
 pub struct Library {
     focus: FocusHandle,
     entries: Vec<Entry>,
-    thumbs: HashMap<String, (Arc<RenderImage>, (u32, u32))>,
-    asked: HashSet<String>,
+    /// Thumbnails decoded, by capture; only those shown lately are kept.
+    thumbs: HashMap<ThumbKey, Thumb>,
+    /// The thumbnails read or being read.
+    asked: HashSet<ThumbKey>,
+    /// Thumbnails rows in sight want, not read yet.
+    wanted: std::cell::RefCell<Vec<ThumbKey>>,
+    /// Thumbnails are being read.
+    fetching: bool,
+    /// Counts frames, to tell which thumbnails were shown lately.
+    frame: u64,
     error: Option<String>,
     editor: Option<Editor>,
     /// The id being opened in the editor.
@@ -345,7 +403,19 @@ pub struct Library {
     selected: Vec<String>,
     /// Where a ⇧-click range starts.
     anchor: Option<usize>,
-    side_scroll: ScrollHandle,
+    /// The side list's rows as last laid out, and its scrolling.
+    side_rows: std::cell::RefCell<Rc<Vec<SideRow>>>,
+    side_list: ListState,
+    /// Likewise for the grid of every capture.
+    grid_rows: std::cell::RefCell<Rc<Vec<GridRow>>>,
+    grid_list: ListState,
+    /// What each list's rows were last made from.
+    side_key: std::cell::RefCell<Option<RowsKey>>,
+    grid_key: std::cell::RefCell<Option<RowsKey>>,
+    /// Counts the times the captures were listed (and the folders read).
+    listed: u64,
+    /// The window's width at the last frame, for the grid's columns.
+    window_width: std::cell::Cell<f32>,
     /// Scroll the side list to the open capture at the next frame.
     reveal: std::cell::Cell<bool>,
     /// The editor's changes, saved a moment after the last one.
@@ -369,6 +439,101 @@ pub struct Library {
     /// the side list is open.
     trashed: Vec<Entry>,
     trash_open: bool,
+}
+
+/// A thumbnail wanted: its capture, and whether whole (for a card) or
+/// small (for a row of the side list).
+type ThumbKey = (String, bool);
+
+/// Thumbnail `img` as GPUI shows it, `big` or small, and its size.
+fn shown_thumb(img: RgbaImage, big: bool) -> (Arc<RenderImage>, (u32, u32)) {
+    // A row's picture, at two pixels a point.
+    let (mw, mh) = ((ROW_PIC_W * 2.) as u32, (ROW_PIC_H * 2.) as u32);
+    let (w, h) = img.dimensions();
+    let img = if !big && (w > mw || h > mh) {
+        let k = (mw as f32 / w as f32).min(mh as f32 / h as f32);
+        image::imageops::thumbnail(&img, ((w as f32 * k).round() as u32).max(1), ((h as f32 * k).round() as u32).max(1))
+    } else {
+        img
+    };
+    let size = img.dimensions();
+    (paint::picture_owned(img), size)
+}
+
+/// A thumbnail decoded, as GPUI shows it.
+struct Thumb {
+    picture: Arc<RenderImage>,
+    size: (u32, u32),
+    /// The frame it was last shown in.
+    shown: std::cell::Cell<u64>,
+}
+
+/// A row of the side list.
+#[derive(Clone, PartialEq)]
+enum SideRow {
+    /// A folder's title, with its captures (newest first).
+    Folder {
+        id: u64,
+        name: String,
+        entries: Rc<Vec<Entry>>,
+    },
+    /// A capture in an open folder; `at` is its place in the list.
+    Capture {
+        at: usize,
+        entry: Entry,
+    },
+    TrashHeader,
+    /// A capture in the open trash.
+    Trashed(Entry),
+    /// Room at the bottom.
+    End,
+}
+
+/// A row of the grid of every capture.
+#[derive(Clone, PartialEq)]
+enum GridRow {
+    Folder {
+        id: u64,
+        name: String,
+        entries: Rc<Vec<Entry>>,
+    },
+    /// Cards across, each with its place in the list.
+    Cards(Vec<(usize, Entry)>),
+    End,
+}
+
+/// What a list of captures is laid out from (see [`Library::rows_key`]).
+#[derive(PartialEq)]
+struct RowsKey {
+    listed: u64,
+    folders: u64,
+    folded: Vec<u64>,
+    trash_open: bool,
+    cols: usize,
+}
+
+/// Lay out `rows` in the list `state` shows, if they differ from those
+/// laid out last (`last`); where it was scrolled to is kept.
+fn sync_list<R: PartialEq>(state: &ListState, last: &std::cell::RefCell<Rc<Vec<R>>>, rows: Vec<R>) {
+    if **last.borrow() == rows {
+        return;
+    }
+    let top = state.logical_scroll_top();
+    let n = rows.len();
+    *last.borrow_mut() = Rc::new(rows);
+    state.reset(n);
+    state.scroll_to(ListOffset { item_ix: top.item_ix.min(n.saturating_sub(1)), offset_in_item: top.offset_in_item });
+}
+
+/// A small icon button in the trash's rows.
+fn trash_action(id: String, name: IconName, hint: &'static str) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(id))
+        .flex_none()
+        .text_color(rgb(DIM))
+        .hover(|s| s.text_color(rgb(TEXT)))
+        .tooltip(tip(hint))
+        .child(icon(name, 13.))
 }
 
 /// A folder's name being edited in place.
@@ -425,6 +590,9 @@ struct Editor {
     /// The image layers alone, flattened, for a mosaic to show averaging;
     /// only made while there is a mosaic.
     under: Option<Arc<RgbaImage>>,
+    /// What `under` was made from: the canvas's size and its image layers
+    /// shown. Only a change to them makes it again, not every step.
+    under_key: Option<((u32, u32), Vec<Shape>)>,
     tool: Option<Tool>,
     style: Style,
     drag: Option<Shape>,
@@ -518,7 +686,9 @@ struct TextEdit {
 }
 
 impl Editor {
-    fn new(entry: Entry, editable: Editable) -> Editor {
+    /// The editor on `editable`; `pictures` are its images as GPUI shows
+    /// them, made off the main thread (see [`Editor::pictures`]).
+    fn new(entry: Entry, editable: Editable, pictures: HashMap<u32, Arc<RenderImage>>) -> Editor {
         let Editable { original, edits, images } = editable;
         let size = original.image.dimensions();
         let mut ed = Editor {
@@ -526,8 +696,9 @@ impl Editor {
             original: Arc::new(original.image),
             doc: Doc::new(original.scale),
             size,
-            pictures: HashMap::new(),
+            pictures,
             under: None,
+            under_key: None,
             tool: None,
             style: Style::default(),
             drag: None,
@@ -551,6 +722,17 @@ impl Editor {
         };
         ed.refresh();
         ed
+    }
+
+    /// The images of `editable` as GPUI shows them: a big capture takes a
+    /// while to turn, so this is done before the editor opens on it.
+    fn pictures(editable: &Editable) -> HashMap<u32, Arc<RenderImage>> {
+        let mut out = HashMap::new();
+        out.insert(ORIGINAL, picture(&editable.original.image));
+        for (n, img) in &editable.images {
+            out.insert(*n, picture(img));
+        }
+        out
     }
 
     /// Do `op`, to be undone later.
@@ -596,7 +778,16 @@ impl Editor {
             }
         }
         let mosaic = self.doc.visible().any(|s| matches!(s, Shape::Mosaic { .. }));
-        self.under = mosaic.then(|| Arc::new(self.compose(true)));
+        if mosaic {
+            let key = (self.size, self.doc.visible().filter(|s| matches!(s, Shape::Image { .. })).cloned().collect());
+            if self.under.is_none() || self.under_key.as_ref() != Some(&key) {
+                self.under = Some(Arc::new(self.compose(true)));
+                self.under_key = Some(key);
+            }
+        } else {
+            self.under = None;
+            self.under_key = None;
+        }
         self.keep_layer();
     }
 
@@ -716,9 +907,26 @@ impl Editor {
         !self.edits.undone.is_empty()
     }
 
-    /// The capture with its markup, at full resolution.
-    fn flat(&self) -> RgbaImage {
-        self.compose(false)
+    /// What makes the capture with its markup, at full resolution (only
+    /// the selected area of it, with `selection`), to run off the main
+    /// thread: a big canvas takes a while.
+    fn flattener(&self, selection: bool) -> impl FnOnce() -> RgbaImage + Send + 'static {
+        let crop = if selection { self.selection_rect() } else { None };
+        let (w, h) = self.size;
+        let (doc, original, images) = (self.doc.clone(), self.original.clone(), self.images.clone());
+        move || {
+            let img = raster::compose(
+                w,
+                h,
+                &doc,
+                |n| if n == ORIGINAL { Some(&*original) } else { images.get(&n).map(|i| &**i) },
+                raster::font(),
+            );
+            match crop {
+                Some((x, y, cw, ch)) => image::imageops::crop_imm(&img, x, y, cw, ch).to_image(),
+                None => img,
+            }
+        }
     }
 
     fn changed(&self) -> bool {
@@ -739,12 +947,12 @@ impl Editor {
         self.push(Op::Crop { x, y, w, h });
     }
 
-    /// The selected area, with its markup.
-    fn selection(&self) -> Option<RgbaImage> {
+    /// The selected area, in canvas pixels: x, y, width, height.
+    fn selection_rect(&self) -> Option<(u32, u32, u32, u32)> {
         let (lo, hi) = self.area.filter(|_| self.pick == Some(Pick::Select))?;
         let (x, y) = (lo.x.round().max(0.) as u32, lo.y.round().max(0.) as u32);
         let (w, h) = ((hi.x.round() as u32).saturating_sub(x).max(1), (hi.y.round() as u32).saturating_sub(y).max(1));
-        Some(image::imageops::crop_imm(&self.flat(), x, y, w, h).to_image())
+        Some((x, y, w, h))
     }
 
     /// Delete what is in the selected area, as one step: the layers wholly
@@ -853,12 +1061,22 @@ impl Library {
             entries: Vec::new(),
             thumbs: HashMap::new(),
             asked: HashSet::new(),
+            wanted: Default::default(),
+            fetching: false,
+            frame: 0,
             error: None,
             editor: None,
             opening: None,
             selected: Vec::new(),
             anchor: None,
-            side_scroll: ScrollHandle::new(),
+            side_rows: Default::default(),
+            side_list: ListState::new(0, ListAlignment::Top, px(200.)),
+            grid_rows: Default::default(),
+            grid_list: ListState::new(0, ListAlignment::Top, px(300.)),
+            side_key: Default::default(),
+            grid_key: Default::default(),
+            listed: 0,
+            window_width: std::cell::Cell::new(1200.),
             title: TITLE.to_owned(),
             expanded: false,
             loaded: false,
@@ -893,11 +1111,14 @@ impl Library {
                             Default::default()
                         });
                         // What is in the trash is listed there alone, latest first.
-                        let (mut trashed, live): (Vec<Entry>, Vec<Entry>) = entries.into_iter().partition(|e| trash.contains(&e.id));
+                        let in_trash: HashSet<&str> = trash.items.iter().map(|t| t.id.as_str()).collect();
+                        let (mut trashed, live): (Vec<Entry>, Vec<Entry>) =
+                            entries.into_iter().partition(|e| in_trash.contains(e.id.as_str()));
                         let order: HashMap<&str, usize> = trash.items.iter().enumerate().map(|(i, t)| (t.id.as_str(), i)).collect();
                         trashed.sort_by_key(|e| order.get(e.id.as_str()).copied().unwrap_or(usize::MAX));
                         this.trashed = trashed;
                         this.entries = live;
+                        this.listed += 1;
                         match folders {
                             Some(Ok(f)) => {
                                 this.folders = f;
@@ -912,7 +1133,9 @@ impl Library {
                         let ids: HashSet<&str> = this.entries.iter().map(|e| e.id.as_str()).collect();
                         this.selected.retain(|id| ids.contains(id.as_str()));
                         let trashed: HashSet<&str> = this.trashed.iter().map(|e| e.id.as_str()).collect();
-                        this.thumbs.retain(|id, _| ids.contains(id.as_str()) || trashed.contains(id.as_str()));
+                        let listed = |(id, _): &ThumbKey| ids.contains(id.as_str()) || trashed.contains(id.as_str());
+                        this.thumbs.retain(|key, _| listed(key));
+                        this.asked.retain(listed);
                         let mut changed = this.folders.keep_only(&ids);
                         changed |= this.file_loose();
                         if changed {
@@ -930,7 +1153,6 @@ impl Library {
                 {
                     this.open_capture(newest, cx);
                 }
-                this.fetch_thumbs(cx);
                 cx.notify();
             });
         })
@@ -942,11 +1164,7 @@ impl Library {
     /// Put each capture in no folder in its day's, the oldest first so the
     /// newest day's folder ends up on top. Whether any was.
     fn file_loose(&mut self) -> bool {
-        let mut changed = false;
-        for e in self.entries.iter().rev() {
-            changed |= self.folders.file(&e.id, &day_folder(e));
-        }
-        changed
+        self.folders.file_all(self.entries.iter().rev().map(|e| (e.id.as_str(), day_folder(e))))
     }
 
     /// The captures by folder, as listed: the folder, its name, and its
@@ -954,8 +1172,10 @@ impl Library {
     fn groups(&self) -> Vec<(u64, String, Vec<Entry>)> {
         let mut out: Vec<(u64, String, Vec<Entry>)> = self.folders.list.iter().map(|f| (f.id, f.name.clone(), Vec::new())).collect();
         let mut loose = Vec::new();
+        let folder_of = self.folders.index();
+        let place: HashMap<u64, usize> = out.iter().enumerate().map(|(i, g)| (g.0, i)).collect();
         for e in &self.entries {
-            match self.folders.folder_of(&e.id).and_then(|id| out.iter().position(|g| g.0 == id)) {
+            match folder_of.get(e.id.as_str()).and_then(|id| place.get(id).copied()) {
                 Some(i) => out[i].2.push(e.clone()),
                 None => loose.push(e.clone()),
             }
@@ -1146,28 +1366,110 @@ impl Library {
             .into_any_element()
     }
 
-    fn fetch_thumbs(&mut self, cx: &mut Context<Self>) {
-        let ids: Vec<String> =
-            self.entries.iter().chain(&self.trashed).filter(|e| self.asked.insert(e.id.clone())).map(|e| e.id.clone()).collect();
-        if ids.is_empty() {
+    /// Thumbnail `id`, drawn to fit `w` × `h`; until it is read, a blank
+    /// `blank` points square, and it is asked for. A small place (a side
+    /// list row) gets a small thumbnail, a card the whole one.
+    fn thumb_element(&self, id: &str, w: f32, h: f32, blank: f32) -> AnyElement {
+        let key = (id.to_owned(), w > ROW_PIC_W || h > ROW_PIC_H);
+        match self.thumbs.get(&key) {
+            Some(t) => {
+                t.shown.set(self.frame);
+                let (tw, th) = t.size;
+                let k = (w / tw as f32).min(h / th as f32);
+                img(ImageSource::Render(t.picture.clone())).w(px(tw as f32 * k)).h(px(th as f32 * k)).into_any_element()
+            },
+            None => {
+                if !self.asked.contains(&key) {
+                    self.wanted.borrow_mut().push(key);
+                }
+                div().size(px(blank)).into_any_element()
+            },
+        }
+    }
+
+    /// Keep thumbnail `img` of capture `id` (a fresh one, after an edit),
+    /// in both sizes.
+    fn keep_thumb(&mut self, id: String, img: RgbaImage) {
+        for big in [false, true] {
+            let (picture, size) = shown_thumb(img.clone(), big);
+            let key = (id.clone(), big);
+            self.asked.insert(key.clone());
+            self.thumbs.insert(key, Thumb { picture, size, shown: std::cell::Cell::new(self.frame) });
+        }
+        self.forget_old_thumbs();
+    }
+
+    /// Past [`THUMBS_KEPT`], let go of the thumbnails shown longest ago;
+    /// they are read again if they come back into sight.
+    fn forget_old_thumbs(&mut self) {
+        if self.thumbs.len() <= THUMBS_KEPT {
             return;
         }
+        let mut by_age: Vec<(u64, ThumbKey)> = self.thumbs.iter().map(|(key, t)| (t.shown.get(), key.clone())).collect();
+        by_age.sort_unstable();
+        // Down well under the limit, so this doesn't run on every one read.
+        let excess = self.thumbs.len() - THUMBS_KEPT * 3 / 4;
+        for (shown, key) in by_age.into_iter().take(excess) {
+            if shown + 1 >= self.frame {
+                break; // in sight now
+            }
+            self.thumbs.remove(&key);
+            self.asked.remove(&key);
+        }
+    }
+
+    /// Read the thumbnails rows in sight want, a batch at a time, decoded
+    /// off the main thread, each batch shown at once.
+    fn fetch_wanted(&mut self, cx: &mut Context<Self>) {
+        if self.fetching || self.wanted.borrow().is_empty() {
+            return;
+        }
+        self.fetching = true;
+        // Run after this frame, so every row in sight has said what it wants.
         cx.spawn(async move |this, cx| {
-            for id in ids {
-                let id2 = id.clone();
-                let thumb = cx.background_executor().spawn(async move { vault()?.thumb(&id2) }).await;
-                let ok = this.update(cx, |this, cx| {
-                    match thumb {
-                        Ok(t) => {
-                            let dims = t.image.dimensions();
-                            this.thumbs.insert(id, (picture(&t.image), dims));
-                        },
-                        Err(e) => log::warn!("thumbnail {id}: {e}"),
+            loop {
+                let ids = this.update(cx, |this, _| {
+                    let ids: Vec<ThumbKey> = this.wanted.borrow_mut().drain(..).filter(|key| this.asked.insert(key.clone())).collect();
+                    if ids.is_empty() {
+                        this.fetching = false;
                     }
-                    cx.notify();
+                    ids
                 });
-                if ok.is_err() {
-                    break;
+                let Ok(ids) = ids else { return };
+                if ids.is_empty() {
+                    return;
+                }
+                for batch in ids.chunks(THUMB_BATCH) {
+                    let batch = batch.to_vec();
+                    let read = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let v = vault();
+                            batch
+                                .into_iter()
+                                .map(|key| {
+                                    let t = v.as_ref().map_err(Clone::clone).and_then(|v| v.thumb(&key.0));
+                                    let big = key.1;
+                                    (key, t.map(|t| shown_thumb(t.image, big)))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .await;
+                    let ok = this.update(cx, |this, cx| {
+                        for (key, t) in read {
+                            match t {
+                                Ok((picture, size)) => {
+                                    this.thumbs.insert(key, Thumb { picture, size, shown: std::cell::Cell::new(this.frame) });
+                                },
+                                Err(e) => log::warn!("thumbnail {}: {e}", key.0),
+                            }
+                        }
+                        this.forget_old_thumbs();
+                        cx.notify();
+                    });
+                    if ok.is_err() {
+                        return;
+                    }
                 }
             }
         })
@@ -1270,9 +1572,9 @@ impl Library {
                         return store::png_bytes(&v.load(&e.id)?.image).map(Copied::Image);
                     }
                     // The files of the last copy go: only one set lies around.
-                    let dir = std::env::temp_dir().join("gannet-copied");
-                    let _ = std::fs::remove_dir_all(&dir);
-                    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                    let dir = copied_dir();
+                    forget_copied();
+                    store::private_dir(&dir)?;
                     let mut paths = Vec::new();
                     for e in &picked {
                         let path = vault::export_path(&dir, e);
@@ -1284,7 +1586,10 @@ impl Library {
                 .await;
             cx.update(|cx| match copied {
                 Ok(Copied::Image(png)) => cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, png))),
-                Ok(Copied::Files(paths)) => copy_files(&paths),
+                Ok(Copied::Files(paths)) => {
+                    copy_files(&paths);
+                    forget_copied_later(cx);
+                },
                 Err(e) => capture::notify("Couldn't copy the captures", &e, cx),
             });
         })
@@ -1311,7 +1616,17 @@ impl Library {
     /// Delete captures `ids`, in the trash, for good.
     fn delete_for_good(&mut self, ids: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         let gone = ids.clone();
-        self.in_vault(move |v| v.delete_for_good(&ids), "Couldn't delete the captures", gone, window, cx);
+        self.in_vault(
+            move |v| {
+                // Copies of them as files would outlive them.
+                forget_copied();
+                v.delete_for_good(&ids)
+            },
+            "Couldn't delete the captures",
+            gone,
+            window,
+            cx,
+        );
     }
 
     /// Delete everything in the trash (`ids`) for good, once the user agrees.
@@ -1391,8 +1706,12 @@ impl Library {
             let loaded = cx
                 .background_executor()
                 .spawn(async move {
-                    let _writes = VAULT_WRITES.lock();
-                    vault()?.load_editable(&id)
+                    let editable = {
+                        let _writes = VAULT_WRITES.lock();
+                        vault()?.load_editable(&id)?
+                    };
+                    let pictures = Editor::pictures(&editable);
+                    Ok::<_, String>((editable, pictures))
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -1401,12 +1720,12 @@ impl Library {
                 }
                 this.opening = None;
                 match loaded {
-                    Ok(editable) => {
+                    Ok((editable, pictures)) => {
                         // The capture it replaces stayed on screen until now.
                         if let Some(old) = this.editor.take() {
                             this.keep_changes(old, cx);
                         }
-                        this.editor = Some(Editor::new(entry, editable));
+                        this.editor = Some(Editor::new(entry, editable, pictures));
                         this.reveal.set(true);
                     },
                     Err(e) => capture::notify("Couldn't open the capture", &e, cx),
@@ -1465,20 +1784,23 @@ impl Library {
                 .spawn(async move {
                     let img = edits::render(&original, &edits.done, scale, &images, raster::font());
                     let thumb = vault::thumbnail(&img);
+                    // Encoded before the files are held: opening another
+                    // capture waits only for the writing.
+                    let png = store::png_bytes(&img)?;
                     let mut writes = VAULT_WRITES.lock().unwrap_or_else(|e| e.into_inner());
                     let latest = writes.get_or_insert_default();
                     if latest.get(&id).is_some_and(|&m| m > n) {
                         return Ok(None);
                     }
                     latest.insert(id.clone(), n);
-                    vault()?.save_edits(&id, &edits, &images, &img, scale)?;
+                    vault()?.save_edits(&id, &edits, &images, &img, Some(&png), scale)?;
                     Ok::<_, String>(Some(thumb))
                 })
                 .await;
             match saved {
                 Ok(Some(thumb)) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.thumbs.insert(key, (picture(&thumb), thumb.dimensions()));
+                        this.keep_thumb(key, thumb);
                         cx.notify();
                     });
                 },
@@ -1519,11 +1841,15 @@ impl Library {
         self.commit_text(window, cx);
         let Some(ed) = &mut self.editor else { return };
         ed.commit_paste();
-        let img = ed.selection().unwrap_or_else(|| ed.flat());
-        match store::png_bytes(&img) {
-            Ok(bytes) => cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, bytes))),
-            Err(e) => capture::notify("Couldn't copy the capture", &e, cx),
-        }
+        let make = ed.flattener(true);
+        cx.spawn(async move |_, cx| {
+            let png = cx.background_executor().spawn(async move { store::png_bytes(&make()) }).await;
+            cx.update(|cx| match png {
+                Ok(bytes) => cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, bytes))),
+                Err(e) => capture::notify("Couldn't copy the capture", &e, cx),
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1561,13 +1887,13 @@ impl Library {
         let dir = prefs::captures_dir(cx);
         let _ = std::fs::create_dir_all(&dir);
         let name = vault::export_path(&dir, &ed.entry).file_name().map(|n| n.to_string_lossy().into_owned());
-        let img = ed.flat();
+        let make = ed.flattener(false);
         let rx = cx.prompt_for_new_path(&dir, name.as_deref());
         cx.spawn(async move |_, cx| {
             let Ok(Ok(Some(path))) = rx.await else { return };
             let written = cx
                 .background_executor()
-                .spawn(async move { img.save_with_format(&path, image::ImageFormat::Png).map_err(|e| e.to_string()) })
+                .spawn(async move { make().save_with_format(&path, image::ImageFormat::Png).map_err(|e| e.to_string()) })
                 .await;
             if let Err(e) = written {
                 cx.update(|cx| capture::notify("Couldn't export the capture", &e, cx));
@@ -2176,9 +2502,32 @@ enum Copied {
 fn clipboard_image(cx: &App) -> Option<RgbaImage> {
     cx.read_from_clipboard()?.into_entries().find_map(|e| match e {
         ClipboardEntry::Image(img) => raster::decode(img.bytes()),
-        ClipboardEntry::ExternalPaths(paths) => paths.paths().iter().find_map(|f| image::open(f).ok().map(|i| i.to_rgba8())),
+        ClipboardEntry::ExternalPaths(paths) => paths.paths().iter().find_map(|f| store::open(f).ok()),
         _ => None,
     })
+}
+
+/// Delete the copied files once something else is put on the clipboard
+/// (they can't be pasted from it any more).
+fn forget_copied_later(cx: &mut App) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    /// Counts copies as files: a later copy takes over the watch.
+    static COPIES: AtomicU64 = AtomicU64::new(0);
+    let me = COPIES.fetch_add(1, Ordering::Relaxed) + 1;
+    let count = pasteboard_count();
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(COPIED_CHECK).await;
+            if COPIES.load(Ordering::Relaxed) != me || !copied_dir().exists() {
+                return;
+            }
+            if cx.update(|_| pasteboard_count()) != count {
+                cx.background_executor().spawn(async { forget_copied() }).await;
+                return;
+            }
+        }
+    })
+    .detach();
 }
 
 fn copy_files(paths: &[std::path::PathBuf]) {
@@ -2221,6 +2570,8 @@ impl Render for Library {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Every change shows, so this is where it is saved from.
         self.save_soon(cx);
+        self.frame += 1;
+        self.window_width.set(window.viewport_size().width.as_f32());
         // What the editor has open, in the title bar rather than the toolbar.
         let title = match self.editor.as_ref().filter(|_| !self.expanded) {
             Some(ed) => format!("{} · {} × {}", ed.entry.taken().format("%-d %b %Y, %H:%M:%S"), ed.size.0, ed.size.1),
@@ -2234,7 +2585,7 @@ impl Render for Library {
             .id("library")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &CloseLibrary, window, cx| {
+            .on_action(cx.listener(|this, _: &crate::menus::CloseWindow, window, cx| {
                 this.commit_text(window, cx);
                 if let Some(ed) = this.editor.take() {
                     this.keep_changes(ed, cx);
@@ -2282,7 +2633,8 @@ impl Library {
             .child(self.grid_title(cx))
             .child(div().flex_1())
             .child(self.new_buttons(cx));
-        div().size_full().flex().flex_col().child(bar).child(self.grid_list(32., cx)).into_any_element()
+        let width = self.window_width.get();
+        div().size_full().flex().flex_col().child(bar).child(self.grid_list(32., width, cx)).into_any_element()
     }
 
     /// The editor with no capture open: the side list (its folders and the
@@ -2308,7 +2660,7 @@ impl Library {
                 .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(words))
                 .child(div().text_size(px(12.)).text_color(rgb(DIM)).child("Take one with the buttons above, or paste an image (⇧⌘V)."))
                 .into_any_element(),
-            self.side(None, cx),
+            self.side(cx),
         ];
         // The layers' panel stays where it is, empty, so nothing moves.
         if self.layers_shown {
@@ -2385,7 +2737,7 @@ impl Library {
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(head)
-            .child(self.grid_list(20., cx));
+            .child(self.grid_list(20., w, cx));
         // A click beside it closes it.
         div()
             .absolute()
@@ -2408,39 +2760,65 @@ impl Library {
         div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(count(self.entries.len())).into_any_element()
     }
 
-    /// The captures by day, `pad` in from the sides; or why there are none.
-    fn grid_list(&self, pad: f32, cx: &mut Context<Self>) -> Stateful<Div> {
-        let list = div().id("grid").flex_1().min_h_0().overflow_y_scroll().px(px(pad)).pt(px(4.)).pb(px(pad)).flex().flex_col();
+    /// The captures by folder, `pad` in from the sides of an area `width`
+    /// points wide; or why there are none. Like the side list, only the
+    /// rows in sight are made.
+    fn grid_list(&self, pad: f32, width: f32, cx: &mut Context<Self>) -> AnyElement {
+        let message = |text: String| div().flex_1().min_h_0().px(px(pad)).pt(px(4.)).child(empty(&text)).into_any_element();
         if let Some(e) = &self.error {
-            return list.child(empty(&format!("The library can't be opened: {e}")));
+            return message(format!("The library can't be opened: {e}"));
         }
         if self.entries.is_empty() {
-            return list.child(empty("No captures yet. Take one from the toolbar or the menu bar."));
+            return message("No captures yet. Take one from the toolbar or the menu bar.".to_owned());
         }
-        let index: HashMap<&str, usize> = self.entries.iter().enumerate().map(|(i, e)| (e.id.as_str(), i)).collect();
-        let mut list = list;
-        for (folder, name, entries) in self.groups() {
-            let header = self.folder_header("grid", folder, &name, &entries, false, cx);
-            let mut cards = div().flex().flex_wrap().gap(px(12.));
-            for e in entries {
-                let i = index.get(e.id.as_str()).copied().unwrap_or(0);
-                cards = cards.child(self.card(i, e, cx));
+        // As many cards to a row as fit.
+        let cols = (((width - 2. * pad + CARD_GAP) / (CARD_W + 16. + CARD_GAP)).floor() as usize).max(1);
+        let key = self.rows_key(cols);
+        if self.grid_key.borrow().as_ref() != Some(&key) {
+            let index: HashMap<&str, usize> = self.entries.iter().enumerate().map(|(i, e)| (e.id.as_str(), i)).collect();
+            let mut rows = Vec::new();
+            for (folder, name, entries) in self.groups() {
+                let cards: Vec<(usize, Entry)> =
+                    entries.iter().map(|e| (index.get(e.id.as_str()).copied().unwrap_or(0), e.clone())).collect();
+                rows.push(GridRow::Folder { id: folder, name, entries: Rc::new(entries) });
+                rows.extend(cards.chunks(cols).map(|c| GridRow::Cards(c.to_vec())));
             }
-            list = list.child(div().pt(px(12.)).pb(px(6.)).child(header)).child(cards);
+            rows.push(GridRow::End);
+            sync_list(&self.grid_list, &self.grid_rows, rows);
+            *self.grid_key.borrow_mut() = Some(key);
         }
-        list
+        list(
+            self.grid_list.clone(),
+            cx.processor(move |this: &mut Self, ix: usize, _window, cx| {
+                let el = this.grid_row(ix, pad, cx);
+                this.fetch_wanted(cx);
+                el
+            }),
+        )
+        .flex_1()
+        .min_h_0()
+        .into_any_element()
+    }
+
+    /// Row `ix` of the grid, `pad` in from the sides.
+    fn grid_row(&self, ix: usize, pad: f32, cx: &mut Context<Self>) -> AnyElement {
+        let Some(row) = self.grid_rows.borrow().get(ix).cloned() else { return div().into_any_element() };
+        let row = match row {
+            GridRow::Folder { id, name, entries } => {
+                div().pt(px(12.)).pb(px(6.)).child(self.folder_header("grid", id, &name, &entries, false, cx))
+            },
+            GridRow::Cards(cards) => {
+                div().flex().gap(px(CARD_GAP)).pb(px(CARD_GAP)).children(cards.into_iter().map(|(i, e)| self.card(i, e, cx)))
+            },
+            GridRow::End => div().h(px(pad)),
+        };
+        row.px(px(pad)).into_any_element()
     }
 
     fn card(&self, i: usize, e: Entry, cx: &mut Context<Self>) -> AnyElement {
         let opening = self.opening.as_deref() == Some(&e.id);
         let picked = self.selected.contains(&e.id);
-        let pic = match self.thumbs.get(&e.id) {
-            Some((pic, (w, h))) => {
-                let k = (CARD_W / *w as f32).min(CARD_PIC_H / *h as f32);
-                img(ImageSource::Render(pic.clone())).w(px(*w as f32 * k)).h(px(*h as f32 * k)).into_any_element()
-            },
-            None => div().size(px(24.)).into_any_element(),
-        };
+        let pic = self.thumb_element(&e.id, CARD_W, CARD_PIC_H, 24.);
         let time = e.taken().format("%H:%M:%S").to_string();
         let dragged = self.dragged(&e.id, time.clone());
         div()
@@ -2580,7 +2958,7 @@ impl Library {
             .child(canvas(|_, _, _| {}, |b, _, window, _| paint_dots(b, window)).absolute().top_0().left_0().size_full());
         let in_trash = self.viewing_trash();
         let bar = if in_trash { self.trash_bar(ed, cx) } else { self.header(ed, cx) };
-        let mut out = vec![stage.into_any_element(), canvas_el.into_any_element(), self.side(Some(&ed.entry.id), cx), bar];
+        let mut out = vec![stage.into_any_element(), canvas_el.into_any_element(), self.side(cx), bar];
         if in_trash {
             // Nothing to mark up, so no layers.
         } else if self.layers_shown {
@@ -2899,21 +3277,12 @@ impl Library {
             )
     }
 
-    /// The trash, last in the side list: captures dropped on it go in;
-    /// open, what is in it, to put back or delete for good.
-    fn trash_node(&self, open_id: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
+    /// The trash's node, last in the side list: captures dropped on it go
+    /// in; a click opens it, to show what is in it.
+    fn trash_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let n = self.trashed.len();
         let open = self.trash_open && n > 0;
-        let action = |id: String, name: IconName, hint: &'static str| {
-            div()
-                .id(SharedString::from(id))
-                .flex_none()
-                .text_color(rgb(DIM))
-                .hover(|s| s.text_color(rgb(TEXT)))
-                .tooltip(tip(hint))
-                .child(icon(name, 13.))
-        };
-        let header = div()
+        div()
             .id("trash")
             .group("day")
             .flex()
@@ -2959,7 +3328,7 @@ impl Library {
                                 .items_center()
                                 .opacity(0.)
                                 .group_hover("day", |s| s.opacity(1.))
-                                .child(action("trash-empty".into(), IconName::Trash, "Empty the trash").on_click(cx.listener(
+                                .child(trash_action("trash-empty".into(), IconName::Trash, "Empty the trash").on_click(cx.listener(
                                     move |this, _: &ClickEvent, window, cx| {
                                         cx.stop_propagation();
                                         this.empty_trash(all.clone(), window, cx);
@@ -2971,79 +3340,70 @@ impl Library {
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.trash_open = !this.trash_open;
                 cx.notify();
-            }));
-        let mut node = div().flex().flex_col().child(header);
-        if !open {
-            return node.into_any_element();
-        }
-        for e in &self.trashed {
-            let current = open_id == Some(e.id.as_str());
-            let pic = match self.thumbs.get(&e.id) {
-                Some((pic, (w, h))) => {
-                    let k = (ROW_PIC_W / *w as f32).min(ROW_PIC_H / *h as f32);
-                    img(ImageSource::Render(pic.clone())).w(px(*w as f32 * k)).h(px(*h as f32 * k)).into_any_element()
-                },
-                None => div().size(px(16.)).into_any_element(),
-            };
-            let (back, gone, open_it) = (vec![e.id.clone()], vec![e.id.clone()], e.clone());
-            node = node.child(
+            }))
+            .into_any_element()
+    }
+
+    /// A capture in the open trash: to open, put back or delete for good.
+    fn trashed_row(&self, e: &Entry, open_id: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
+        let current = open_id == Some(e.id.as_str());
+        let pic = self.thumb_element(&e.id, ROW_PIC_W, ROW_PIC_H, 16.);
+        let (back, gone, open_it) = (vec![e.id.clone()], vec![e.id.clone()], e.clone());
+        div()
+            .id(SharedString::from(format!("trashed-{}", e.id)))
+            .group("card")
+            .cursor_pointer()
+            .ml(px(11.))
+            .pl(px(8.))
+            .border_l_1()
+            .border_color(rgba(LINE))
+            .child(
                 div()
-                    .id(SharedString::from(format!("trashed-{}", e.id)))
-                    .group("card")
-                    .cursor_pointer()
-                    .ml(px(11.))
-                    .pl(px(8.))
-                    .border_l_1()
-                    .border_color(rgba(LINE))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .p(px(3.))
+                    .rounded(px(6.))
+                    .map(|d| if current { d.bg(rgba(0xffffff26)) } else { d.group_hover("card", |s| s.bg(rgba(0xffffff12))) })
+                    .child(
+                        div()
+                            .w(px(ROW_PIC_W))
+                            .h(px(ROW_PIC_H))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.))
+                            .bg(rgb(BG))
+                            .overflow_hidden()
+                            .opacity(0.6)
+                            .child(pic),
+                    )
+                    .child(div().flex_1().text_size(px(12.)).text_color(rgb(DIM)).child(e.taken().format("%H:%M:%S").to_string()))
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(10.))
-                            .p(px(3.))
-                            .rounded(px(6.))
-                            .map(|d| if current { d.bg(rgba(0xffffff26)) } else { d.group_hover("card", |s| s.bg(rgba(0xffffff12))) })
-                            .child(
-                                div()
-                                    .w(px(ROW_PIC_W))
-                                    .h(px(ROW_PIC_H))
-                                    .flex()
-                                    .flex_none()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(4.))
-                                    .bg(rgb(BG))
-                                    .overflow_hidden()
-                                    .opacity(0.6)
-                                    .child(pic),
-                            )
-                            .child(div().flex_1().text_size(px(12.)).text_color(rgb(DIM)).child(e.taken().format("%H:%M:%S").to_string()))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.))
-                                    .pr(px(4.))
-                                    .opacity(0.)
-                                    .group_hover("card", |s| s.opacity(1.))
-                                    .child(action(format!("restore-{}", e.id), IconName::Undo2, "Put back").on_click(cx.listener(
-                                        move |this, _: &ClickEvent, _, cx| {
-                                            cx.stop_propagation();
-                                            this.restore(back.clone(), cx);
-                                        },
-                                    )))
-                                    .child(action(format!("forget-{}", e.id), IconName::X, "Delete for good").on_click(cx.listener(
-                                        move |this, _: &ClickEvent, window, cx| {
-                                            cx.stop_propagation();
-                                            this.delete_for_good(gone.clone(), window, cx);
-                                        },
-                                    ))),
-                            ),
-                    )
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.switch_to(open_it.clone(), window, cx))),
-            );
-        }
-        node.into_any_element()
+                            .gap(px(8.))
+                            .pr(px(4.))
+                            .opacity(0.)
+                            .group_hover("card", |s| s.opacity(1.))
+                            .child(trash_action(format!("restore-{}", e.id), IconName::Undo2, "Put back").on_click(cx.listener(
+                                move |this, _: &ClickEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.restore(back.clone(), cx);
+                                },
+                            )))
+                            .child(trash_action(format!("forget-{}", e.id), IconName::X, "Delete for good").on_click(cx.listener(
+                                move |this, _: &ClickEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.delete_for_good(gone.clone(), window, cx);
+                                },
+                            ))),
+                    ),
+            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.switch_to(open_it.clone(), window, cx)))
+            .into_any_element()
     }
 
     /// Left in the side list's top: what to do with the captures picked,
@@ -3062,133 +3422,71 @@ impl Library {
         }
     }
 
-    /// The captures by folder, and the trash; `open_id` is the capture
-    /// open in the editor.
-    fn side(&self, open_id: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
-        let mut list = div()
-            .id("side")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.side_scroll)
-            .px(px(8.))
-            .pb(px(16.))
-            .flex()
-            .flex_col()
-            .gap(px(0.));
+    /// What the side list's and grid's rows are made from, `cols` cards
+    /// across (the grid's): while it is the same, so are they.
+    fn rows_key(&self, cols: usize) -> RowsKey {
+        let mut folded: Vec<u64> = self.folded.iter().copied().collect();
+        folded.sort_unstable();
+        RowsKey { listed: self.listed, folders: self.folders.rev(), folded, trash_open: self.trash_open, cols }
+    }
+
+    /// The rows of the side list as it is now: the captures by folder,
+    /// then the trash.
+    fn side_rows(&self) -> Vec<SideRow> {
         let index: HashMap<&str, usize> = self.entries.iter().enumerate().map(|(i, e)| (e.id.as_str(), i)).collect();
-        let mut children = 0;
+        let mut rows = Vec::new();
         for (folder, name, entries) in self.groups() {
-            list = list.child(self.folder_header("side", folder, &name, &entries, true, cx));
-            children += 1;
-            if self.folded.contains(&folder) {
-                continue;
-            }
-            for e in entries {
-                let current = open_id == Some(e.id.as_str()) || self.opening.as_deref() == Some(&e.id);
-                if open_id == Some(e.id.as_str()) && self.reveal.take() {
-                    self.side_scroll.scroll_to_item(children);
-                }
-                children += 1;
-                let (pw, ph) = (ROW_PIC_W, ROW_PIC_H);
-                let pic = match self.thumbs.get(&e.id) {
-                    Some((pic, (w, h))) => {
-                        let k = (pw / *w as f32).min(ph / *h as f32);
-                        img(ImageSource::Render(pic.clone())).w(px(*w as f32 * k)).h(px(*h as f32 * k)).into_any_element()
-                    },
-                    None => div().size(px(16.)).into_any_element(),
-                };
-                let time = e.taken().format("%H:%M:%S").to_string();
-                let at = index.get(e.id.as_str()).copied().unwrap_or(0);
-                let frame = div()
-                    .w(px(pw))
-                    .h(px(ph))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.))
-                    .bg(rgb(BG))
-                    .relative()
-                    .overflow_hidden()
-                    .child(pic);
-                let dragged = self.dragged(&e.id, time.clone());
-                let item = div()
-                    .id(SharedString::from(format!("side-{}", e.id)))
-                    .group("card")
-                    .relative()
-                    .cursor_pointer()
-                    .on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone()));
-                // A row under its folder, a line down the left joining them:
-                // the picture small, the time, its pick box.
-                let item = item.ml(px(11.)).pl(px(8.)).border_l_1().border_color(rgba(LINE)).child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .p(px(3.))
-                        .rounded(px(6.))
-                        .map(|d| if current { d.bg(rgba(0xffffff26)) } else { d.group_hover("card", |s| s.bg(rgba(0xffffff12))) })
-                        .child(frame)
-                        .child(div().flex_1().text_size(px(12.)).text_color(if current { rgb(TEXT) } else { rgb(DIM) }).child(time))
-                        // Copy, trash and pick box spaced as on the folder header,
-                        // so the trash buttons line up down the tree.
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .pr(px(3.))
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!("row-copy-{}", e.id)))
-                                        .flex_none()
-                                        .opacity(0.)
-                                        .group_hover("card", |s| s.opacity(1.))
-                                        .text_color(rgb(DIM))
-                                        .hover(|s| s.text_color(rgb(TEXT)))
-                                        .tooltip(tip("Copy"))
-                                        .on_click({
-                                            let entry = e.clone();
-                                            cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                                cx.stop_propagation();
-                                                this.copy_entries(vec![entry.clone()], cx);
-                                            })
-                                        })
-                                        .child(icon(IconName::Copy, 13.)),
-                                )
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!("row-delete-{}", e.id)))
-                                        .flex_none()
-                                        .opacity(0.)
-                                        .group_hover("card", |s| s.opacity(1.))
-                                        .text_color(rgb(DIM))
-                                        .hover(|s| s.text_color(rgb(TEXT)))
-                                        .tooltip(tip("Delete"))
-                                        .on_click({
-                                            let id = e.id.clone();
-                                            cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                                cx.stop_propagation();
-                                                this.delete(vec![id.clone()], window, cx);
-                                            })
-                                        })
-                                        .child(icon(IconName::Trash, 13.)),
-                                )
-                                .child(self.pick_dot(at, &e.id, cx)),
-                        ),
+            let folded = self.folded.contains(&folder);
+            let entries = Rc::new(entries);
+            rows.push(SideRow::Folder { id: folder, name, entries: entries.clone() });
+            if !folded {
+                rows.extend(
+                    entries.iter().map(|e| SideRow::Capture { at: index.get(e.id.as_str()).copied().unwrap_or(0), entry: e.clone() }),
                 );
-                list = list.child(item.on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
-                    let m = ev.modifiers();
-                    if m.shift || m.secondary() {
-                        this.toggle_card(at, m.shift, cx);
-                    } else {
-                        this.switch_to(e.clone(), window, cx);
-                    }
-                })));
             }
         }
-        list = list.child(self.trash_node(open_id, cx));
+        rows.push(SideRow::TrashHeader);
+        if self.trash_open {
+            rows.extend(self.trashed.iter().cloned().map(SideRow::Trashed));
+        }
+        rows.push(SideRow::End);
+        rows
+    }
+
+    /// The captures by folder, and the trash. Only the rows in sight are
+    /// made, so a library of thousands draws as fast as a short one.
+    fn side(&self, cx: &mut Context<Self>) -> AnyElement {
+        // Laid out again only when what it lists changed, not on every
+        // frame (a drag on the canvas draws many).
+        let key = self.rows_key(0);
+        if self.side_key.borrow().as_ref() != Some(&key) {
+            sync_list(&self.side_list, &self.side_rows, self.side_rows());
+            *self.side_key.borrow_mut() = Some(key);
+        }
+        let open_id = self.editor.as_ref().map(|ed| ed.entry.id.as_str());
+        let reveal = self
+            .reveal
+            .take()
+            .then(|| {
+                self.side_rows
+                    .borrow()
+                    .iter()
+                    .position(|r| matches!(r, SideRow::Capture { entry, .. } if Some(entry.id.as_str()) == open_id))
+            })
+            .flatten();
+        if let Some(ix) = reveal {
+            self.side_list.scroll_to_reveal_item(ix);
+        }
+        let list = list(
+            self.side_list.clone(),
+            cx.processor(|this: &mut Self, ix: usize, _window, cx| {
+                let el = this.side_row(ix, cx);
+                this.fetch_wanted(cx);
+                el
+            }),
+        )
+        .flex_1()
+        .min_h_0();
         div()
             .absolute()
             .top(px(FLOAT))
@@ -3206,6 +3504,116 @@ impl Library {
             .child(self.side_top(cx))
             .child(list)
             .into_any_element()
+    }
+
+    /// Row `ix` of the side list.
+    fn side_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(row) = self.side_rows.borrow().get(ix).cloned() else { return div().into_any_element() };
+        let open_id = self.editor.as_ref().map(|ed| ed.entry.id.clone());
+        let open_id = open_id.as_deref();
+        let el = match row {
+            SideRow::Folder { id, name, entries } => self.folder_header("side", id, &name, &entries, true, cx),
+            SideRow::Capture { at, entry } => self.side_capture(at, entry, open_id, cx),
+            SideRow::TrashHeader => self.trash_header(cx),
+            SideRow::Trashed(e) => self.trashed_row(&e, open_id, cx),
+            SideRow::End => return div().h(px(16.)).into_any_element(),
+        };
+        div().px(px(8.)).child(el).into_any_element()
+    }
+
+    /// A capture's row in the side list, under its folder.
+    fn side_capture(&self, at: usize, e: Entry, open_id: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
+        let current = open_id == Some(e.id.as_str()) || self.opening.as_deref() == Some(&e.id);
+        let (pw, ph) = (ROW_PIC_W, ROW_PIC_H);
+        let pic = self.thumb_element(&e.id, pw, ph, 16.);
+        let time = e.taken().format("%H:%M:%S").to_string();
+        let frame = div()
+            .w(px(pw))
+            .h(px(ph))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.))
+            .bg(rgb(BG))
+            .relative()
+            .overflow_hidden()
+            .child(pic);
+        let dragged = self.dragged(&e.id, time.clone());
+        let item = div()
+            .id(SharedString::from(format!("side-{}", e.id)))
+            .group("card")
+            .relative()
+            .cursor_pointer()
+            .on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone()));
+        // A row under its folder, a line down the left joining them:
+        // the picture small, the time, its pick box.
+        let item = item.ml(px(11.)).pl(px(8.)).border_l_1().border_color(rgba(LINE)).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .p(px(3.))
+                .rounded(px(6.))
+                .map(|d| if current { d.bg(rgba(0xffffff26)) } else { d.group_hover("card", |s| s.bg(rgba(0xffffff12))) })
+                .child(frame)
+                .child(div().flex_1().text_size(px(12.)).text_color(if current { rgb(TEXT) } else { rgb(DIM) }).child(time))
+                // Copy, trash and pick box spaced as on the folder header,
+                // so the trash buttons line up down the tree.
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .pr(px(3.))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("row-copy-{}", e.id)))
+                                .flex_none()
+                                .opacity(0.)
+                                .group_hover("card", |s| s.opacity(1.))
+                                .text_color(rgb(DIM))
+                                .hover(|s| s.text_color(rgb(TEXT)))
+                                .tooltip(tip("Copy"))
+                                .on_click({
+                                    let entry = e.clone();
+                                    cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.copy_entries(vec![entry.clone()], cx);
+                                    })
+                                })
+                                .child(icon(IconName::Copy, 13.)),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("row-delete-{}", e.id)))
+                                .flex_none()
+                                .opacity(0.)
+                                .group_hover("card", |s| s.opacity(1.))
+                                .text_color(rgb(DIM))
+                                .hover(|s| s.text_color(rgb(TEXT)))
+                                .tooltip(tip("Delete"))
+                                .on_click({
+                                    let id = e.id.clone();
+                                    cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                        cx.stop_propagation();
+                                        this.delete(vec![id.clone()], window, cx);
+                                    })
+                                })
+                                .child(icon(IconName::Trash, 13.)),
+                        )
+                        .child(self.pick_dot(at, &e.id, cx)),
+                ),
+        );
+        item.on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
+            let m = ev.modifiers();
+            if m.shift || m.secondary() {
+                this.toggle_card(at, m.shift, cx);
+            } else {
+                this.switch_to(e.clone(), window, cx);
+            }
+        }))
+        .into_any_element()
     }
 
     /// The editor's toolbar, right of the side list: marking up in the

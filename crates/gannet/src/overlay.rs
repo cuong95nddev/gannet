@@ -67,14 +67,22 @@ pub struct Overlay {
 
 impl Overlay {
     /// The overlay over `base`, a display `width_pt` points wide; with
-    /// `scroll`, the region picked is for a scrolling capture.
-    pub fn new(base: RgbaImage, width_pt: f32, scroll: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `scroll`, the region picked is for a scrolling capture. `picture`
+    /// is `base` as GPUI shows it, if it was made already.
+    pub fn new(
+        base: RgbaImage,
+        picture: Option<Arc<RenderImage>>,
+        width_pt: f32,
+        scroll: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let scale = if width_pt > 0. { base.width() as f32 / width_pt } else { 1. };
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         Self {
             focus,
-            picture: picture(&base),
+            picture: picture.unwrap_or_else(|| self::picture(&base)),
             base: Arc::new(base),
             scale,
             sel: None,
@@ -294,6 +302,11 @@ impl Overlay {
 
     /// The region with its markup, at full resolution.
     fn export(&self) -> Option<RgbaImage> {
+        self.exporter().map(|make| make())
+    }
+
+    /// What makes [`Self::export`]'s image, to run off the main thread.
+    fn exporter(&self) -> Option<impl FnOnce() -> RgbaImage + Send + 'static> {
         let (lo, hi) = self.sel?;
         let (lo, hi) = (self.to_px(lo), self.to_px(hi));
         let crop = Crop {
@@ -302,7 +315,8 @@ impl Overlay {
             w: (hi.x - lo.x).round().max(1.) as u32,
             h: (hi.y - lo.y).round().max(1.) as u32,
         };
-        Some(raster::render(&self.base, crop, &self.doc, raster::font()))
+        let (base, doc) = (self.base.clone(), self.doc.clone());
+        Some(move || raster::render(&base, crop, &doc, raster::font()))
     }
 
     fn finish_text(&mut self, cx: &mut Context<Self>) {
@@ -326,17 +340,17 @@ impl Overlay {
             return;
         }
         self.finish_text(cx);
-        let Some(img) = self.export() else { return };
+        let Some(make) = self.exporter() else { return };
         capture::close(cx);
-        capture::deliver(img, self.scale, false, cx);
+        capture::deliver_with(make, self.scale, false, cx);
     }
 
     /// Copy and keep it like `done`, then open it in the library's editor.
     fn edit(&mut self, cx: &mut Context<Self>) {
         self.finish_text(cx);
-        let Some(img) = self.export() else { return };
+        let Some(make) = self.exporter() else { return };
         capture::close(cx);
-        capture::deliver(img, self.scale, true, cx);
+        capture::deliver_with(make, self.scale, true, cx);
     }
 
     fn save_as(&mut self, format: capture::Format, cx: &mut Context<Self>) {

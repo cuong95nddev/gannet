@@ -44,6 +44,60 @@ pub fn png_bytes(img: &RgbaImage) -> Result<Vec<u8>, String> {
     Ok(buf.into_inner())
 }
 
+/// The longest side of an image Gannet reads, in pixels: well past any
+/// screen, or the tallest scrolling capture.
+pub const MAX_SIDE: u32 = 50_000;
+/// The most memory decoding one image may take.
+const MAX_ALLOC: u64 = 1 << 30;
+
+fn limits() -> image::Limits {
+    let mut l = image::Limits::default();
+    l.max_image_width = Some(MAX_SIDE);
+    l.max_image_height = Some(MAX_SIDE);
+    l.max_alloc = Some(MAX_ALLOC);
+    l
+}
+
+/// Decode an image of any format Gannet reads, within limits, so a hostile
+/// file (pasted, or opened) can't take all the memory.
+pub fn decode(bytes: &[u8]) -> Result<RgbaImage, String> {
+    let mut r = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().map_err(|e| e.to_string())?;
+    r.limits(limits());
+    Ok(r.decode().map_err(|e| e.to_string())?.into_rgba8())
+}
+
+/// Read the image file `path`, within the same limits as [`decode`].
+pub fn open(path: &Path) -> Result<RgbaImage, String> {
+    let mut r = image::ImageReader::open(path).map_err(|e| e.to_string())?.with_guessed_format().map_err(|e| e.to_string())?;
+    r.limits(limits());
+    Ok(r.decode().map_err(|e| e.to_string())?.into_rgba8())
+}
+
+/// Write `bytes` to `path` through a temporary file beside it, so a crash
+/// never leaves half a file; only the user may read it. The temporary
+/// file is named after the whole file name, so files of one capture never
+/// share it.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).map_err(|e| e.to_string())?;
+    f.write_all(bytes).map_err(|e| e.to_string())?;
+    drop(f);
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+/// Make folder `dir` if it isn't there, the user's alone (0700); one made
+/// by an older version is closed to others too.
+pub fn private_dir(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(|e| e.to_string())?;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    Ok(())
+}
+
 /// Delete PNGs in `dir` older than `max_age`.
 pub fn cleanup(dir: &Path, max_age: Duration) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };

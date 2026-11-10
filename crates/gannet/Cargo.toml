@@ -20,6 +20,7 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "block2", "NSApplication", "NSColor", "NSColorSpace", "NSEvent", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSRunningApplication", "NSWorkspace", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSButton", "NSControl", "NSView", "NSWindow", "NSScreen", "NSGraphics", "NSPasteboard", "NSPasteboardItem", "NSPanel", "NSSavePanel", "NSOpenPanel"] }
 raw-window-handle = "0.6"
 security-framework = "3"
+zeroize = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSBundle", "NSData", "NSError", "NSGeometry", "NSString", "NSURL"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNNotificationSettings", "UNUserNotificationCenter"] }

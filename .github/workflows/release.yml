@@ -18,14 +18,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
+      # Not for a tagged release: a cache written by any push to main would
+      # go into the binary users download.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Check tag matches Cargo.toml
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != Cargo.toml v$v"; exit 1; }
       # Signing and notarization run only when the secrets are set (see
-      # README); without them the DMG holds an ad hoc signed app.
+      # README); without them a manual run builds an ad hoc signed app, and
+      # a tagged release fails rather than publish one.
       - name: Import signing certificate and notary key
         env:
           CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
@@ -35,7 +39,12 @@ jobs:
           NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
           NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
         run: |
-          [ -n "$CERT_P12" ] || { echo "no signing secrets: ad hoc build"; exit 0; }
+          if [ -z "$CERT_P12" ] || [ -z "$NOTARY_KEY" ]; then
+            case "$GITHUB_REF" in
+              refs/tags/*) echo "::error::a release must be signed and notarized: set MACOS_CERT_P12 and NOTARY_KEY"; exit 1 ;;
+            esac
+            [ -n "$CERT_P12" ] || { echo "no signing secrets: ad hoc build"; exit 0; }
+          fi
           KC="$RUNNER_TEMP/sign.keychain-db"
           KC_PASS=$(openssl rand -hex 16)
           security create-keychain -p "$KC_PASS" "$KC"

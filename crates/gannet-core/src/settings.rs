@@ -425,15 +425,13 @@ impl Settings {
     }
 
     /// Write to `path`, through a temporary file so a crash never leaves
-    /// half a file.
+    /// half a file; the user's alone.
     pub fn save(&self, path: &Path) -> Result<(), String> {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            store::private_dir(dir)?;
         }
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, text + "\n").map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+        store::write_private(path, (text + "\n").as_bytes())
     }
 }
 

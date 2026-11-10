@@ -28,7 +28,7 @@ if [ "${GANNET_UNIVERSAL:-}" = 1 ]; then
         "$ROOT/target/aarch64-apple-darwin/release/gannet" \
         "$ROOT/target/x86_64-apple-darwin/release/gannet"
 else
-    cargo build --release -p gannet --manifest-path "$ROOT/Cargo.toml" >&2
+    cargo build --locked --release -p gannet --manifest-path "$ROOT/Cargo.toml" >&2
     cp "$ROOT/target/release/gannet" "$APP/Contents/MacOS/gannet"
 fi
 
