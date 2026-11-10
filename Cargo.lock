@@ -1997,7 +1997,7 @@ dependencies = [
 
 [[package]]
 name = "gannet"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "block2 0.6.2",
  "chrono",
@@ -2021,7 +2021,7 @@ dependencies = [
 
 [[package]]
 name = "gannet-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "ab_glyph",
  "aes-gcm",
