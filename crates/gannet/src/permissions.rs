@@ -88,10 +88,12 @@ pub fn can_relaunch() -> bool {
     bundle_path().is_some()
 }
 
-/// Quit and open again, so a permission granted while running takes.
-pub fn relaunch(cx: &mut App) {
+/// Quit and open again, so a permission granted while running takes;
+/// with `settings`, on the Settings window.
+pub fn relaunch(settings: bool, cx: &mut App) {
     let Some(app) = bundle_path() else { return };
-    let spawned = std::process::Command::new("/bin/sh").args(["-c", "sleep 1; /usr/bin/open \"$0\" --args --settings"]).arg(&app).spawn();
+    let script = if settings { "sleep 1; /usr/bin/open \"$0\" --args --settings" } else { "sleep 1; /usr/bin/open \"$0\"" };
+    let spawned = std::process::Command::new("/bin/sh").args(["-c", script]).arg(&app).spawn();
     match spawned {
         Ok(_) => cx.quit(),
         Err(e) => log::error!("can't reopen Gannet: {e}"),

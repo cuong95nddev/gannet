@@ -9,6 +9,7 @@ mod hotkeys;
 mod icons;
 mod library;
 mod menus;
+mod onboarding;
 mod open_panel;
 mod overlay;
 mod paint;
@@ -62,10 +63,28 @@ pub fn send(cx: &App, cmd: Command) {
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let app = gpui_kit::application().with_assets(icons::Assets);
-    // The Dock icon clicked with no window open: the library (editor).
-    app.on_reopen(library::open);
+    // The Dock icon clicked with no window open: the library (editor),
+    // once Gannet has started.
+    app.on_reopen(|cx| {
+        if cx.has_global::<Commands>() {
+            library::open(cx);
+        }
+    });
     app.run(|cx| {
         gpui_kit::init(cx);
+        // Without Screen Recording nothing can be captured: the user is
+        // walked through allowing it before anything else.
+        if onboarding::needed() {
+            onboarding::show(start, cx);
+        } else {
+            start(cx);
+        }
+    });
+}
+
+/// Gannet as it runs: the menu bar icon, the shortcuts, the menus.
+fn start(cx: &mut App) {
+    {
         let (tx, rx) = flume::unbounded::<Command>();
         status_item::install(tx.clone());
         cx.set_global(Commands(tx.clone()));
@@ -93,7 +112,7 @@ fn main() {
         if std::env::args().any(|a| a == "--settings") {
             settings_window::open(cx);
         }
-    });
+    }
 }
 
 fn capture_arg() -> Option<capture::Mode> {

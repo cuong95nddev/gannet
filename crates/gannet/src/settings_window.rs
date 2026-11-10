@@ -10,6 +10,7 @@ use std::rc::Rc;
 use gannet_core::settings::{Action, KEEP_CHOICES, Mods, Settings, Shortcut, ToolbarPlace};
 use gannet_core::store;
 use gpui_kit::component::Theme;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -61,34 +62,34 @@ pub fn open(cx: &mut App) {
 
 /// The colours macOS draws its settings with, light or dark.
 #[derive(Clone, Copy)]
-struct Pal {
-    window: Hsla,
-    sidebar: Hsla,
-    group: Hsla,
-    group_border: Hsla,
-    separator: Hsla,
-    text: Hsla,
-    secondary: Hsla,
-    tertiary: Hsla,
-    field: Hsla,
-    field_border: Hsla,
-    button: Hsla,
-    button_border: Hsla,
+pub(crate) struct Pal {
+    pub(crate) window: Hsla,
+    pub(crate) sidebar: Hsla,
+    pub(crate) group: Hsla,
+    pub(crate) group_border: Hsla,
+    pub(crate) separator: Hsla,
+    pub(crate) text: Hsla,
+    pub(crate) secondary: Hsla,
+    pub(crate) tertiary: Hsla,
+    pub(crate) field: Hsla,
+    pub(crate) field_border: Hsla,
+    pub(crate) button: Hsla,
+    pub(crate) button_border: Hsla,
     /// What is picked or focused: black, or white in the dark.
-    strong: Hsla,
+    pub(crate) strong: Hsla,
     /// Words on `strong`.
-    on_strong: Hsla,
+    pub(crate) on_strong: Hsla,
     /// The sidebar's page.
-    selection: Hsla,
+    pub(crate) selection: Hsla,
     /// A switch that is on.
-    switch: Hsla,
-    danger: Hsla,
-    warning: Hsla,
-    success: Hsla,
+    pub(crate) switch: Hsla,
+    pub(crate) danger: Hsla,
+    pub(crate) warning: Hsla,
+    pub(crate) success: Hsla,
 }
 
 impl Pal {
-    fn new(dark: bool) -> Pal {
+    pub(crate) fn new(dark: bool) -> Pal {
         if dark {
             Pal {
                 window: rgb(0x1e1e1e).into(),
@@ -137,7 +138,7 @@ impl Pal {
     }
 }
 
-fn is_dark(window: &Window) -> bool {
+pub(crate) fn is_dark(window: &Window) -> bool {
     matches!(window.appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark)
 }
 
@@ -234,8 +235,18 @@ impl Page {
     }
 }
 
+/// A part of the settings shown in another window (onboarding).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Embedded {
+    Shortcuts,
+    /// Where exported captures go.
+    Folder,
+}
+
 pub struct SettingsView {
     page: Page,
+    /// Shown inside another window: only this part, no sidebar or title.
+    embedded: Option<Embedded>,
     screen: Status,
     notifications: Status,
     recording: Option<Recording>,
@@ -250,6 +261,17 @@ pub struct SettingsView {
 
 impl SettingsView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        window.set_window_title(Page::Shortcuts.title());
+        dock::set(dock::Window::Settings, true, cx);
+        Self::with(None, window, cx)
+    }
+
+    /// Part `part` of the settings, for another window to show.
+    pub(crate) fn embedded(part: Embedded, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::with(Some(part), window, cx)
+    }
+
+    fn with(embedded: Option<Embedded>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Light or dark, as macOS is (the component theme starts light).
         Theme::sync_system_appearance(Some(window), cx);
         let subs = vec![
@@ -266,17 +288,18 @@ impl SettingsView {
                 cx.notify();
             }),
             cx.on_release(|this, cx| {
-                dock::set(dock::Window::Settings, false, cx);
+                if this.embedded.is_none() {
+                    dock::set(dock::Window::Settings, false, cx);
+                }
                 if this.recording.take().is_some() {
                     prefs::reapply(cx);
                 }
             }),
         ];
         let fields = Action::ALL.iter().enumerate().map(|(i, _)| cx.focus_handle().tab_index(i as isize).tab_stop(true)).collect();
-        window.set_window_title(Page::Shortcuts.title());
-        dock::set(dock::Window::Settings, true, cx);
         let mut this = Self {
             page: Page::Shortcuts,
+            embedded,
             screen: permissions::screen_recording(),
             notifications: Status::NotAsked,
             recording: None,
@@ -666,7 +689,7 @@ fn group(pal: Pal) -> Div {
 }
 
 /// A macOS push button (rounded, regular size).
-fn push_button(id: &'static str, pal: Pal) -> Stateful<Div> {
+pub(crate) fn push_button(id: &'static str, pal: Pal) -> Stateful<Div> {
     div()
         .id(id)
         .relative()
@@ -904,7 +927,7 @@ impl SettingsView {
                             .text_color(pal.secondary)
                             .child("macOS applies Screen Recording when Gannet starts: after allowing it, reopen Gannet."),
                     )
-                    .child(push_button("relaunch", pal).child("Reopen Gannet").on_click(|_, _, cx| permissions::relaunch(cx)))
+                    .child(push_button("relaunch", pal).child("Reopen Gannet").on_click(|_, _, cx| permissions::relaunch(true, cx)))
                     .into_any_element(),
             );
         }
@@ -947,6 +970,18 @@ fn note(text: &str, pal: Pal) -> AnyElement {
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pal = Pal::new(is_dark(window));
+        if let Some(part) = self.embedded {
+            let content = match part {
+                // The shortcuts and how to change them; not Restore Defaults,
+                // which they are on a first start.
+                Embedded::Shortcuts => self.shortcuts_page(pal, window, cx).into_iter().take(2).collect(),
+                Embedded::Folder => {
+                    let settings = prefs::get(cx).clone();
+                    vec![group(pal).child(self.folder_row(&settings, pal, cx)).into_any_element()]
+                },
+            };
+            return v_stack().key_context(KEY_CONTEXT).w_full().gap(px(8.)).text_color(pal.text).children(content).into_any_element();
+        }
         let sidebar = self.sidebar(pal, cx);
         let content = match self.page {
             Page::Shortcuts => self.shortcuts_page(pal, window, cx),
@@ -962,17 +997,22 @@ impl Render for SettingsView {
             .text_color(pal.text)
             .font_family(".SystemUIFont")
             .child(sidebar)
+            // The page scrolls when it is taller than the window (which
+            // keeps its size), with a scroll bar to show there is more.
             .child(
-                v_stack()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .px(px(20.))
-                    .pt(px(14.))
-                    .pb(px(20.))
-                    .gap(px(8.))
-                    .child(div().px(px(10.)).pb(px(4.)).text_size(px(15.)).font_weight(FontWeight::BOLD).child(self.page.title()))
-                    .children(content),
+                div().id("page").flex_1().min_w_0().h_full().overflow_y_scrollbar().child(
+                    // At least the window's height, so a short page's last
+                    // row still sits at the bottom.
+                    v_stack()
+                        .min_h_full()
+                        .px(px(20.))
+                        .pt(px(14.))
+                        .pb(px(20.))
+                        .gap(px(8.))
+                        .child(div().px(px(10.)).pb(px(4.)).text_size(px(15.)).font_weight(FontWeight::BOLD).child(self.page.title()))
+                        .children(content),
+                ),
             )
+            .into_any_element()
     }
 }

@@ -14,12 +14,15 @@ use objc2_foundation::ns_string;
 pub enum Window {
     Library,
     Settings,
+    /// The first start's window, asking for Screen Recording.
+    Onboarding,
 }
 
 #[derive(Default)]
 struct Open {
     library: bool,
     settings: bool,
+    onboarding: bool,
 }
 
 impl Global for Open {}
@@ -30,8 +33,9 @@ pub fn set(window: Window, open: bool, cx: &mut App) {
     match window {
         Window::Library => o.library = open,
         Window::Settings => o.settings = open,
+        Window::Onboarding => o.onboarding = open,
     }
-    let regular = o.library || o.settings;
+    let regular = o.library || o.settings || o.onboarding;
     let Some(mtm) = MainThreadMarker::new() else { return };
     let app = NSApplication::sharedApplication(mtm);
     let policy = if regular { NSApplicationActivationPolicy::Regular } else { NSApplicationActivationPolicy::Accessory };
