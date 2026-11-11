@@ -4,7 +4,7 @@
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSMenu, NSMenuItem, NSView};
+use objc2_app_kit::{NSMenu, NSMenuItem};
 use objc2_foundation::{NSPoint, NSString, ns_string};
 
 pub enum Item {
@@ -48,12 +48,10 @@ impl Target {
 ///
 /// AppKit runs the menu in a loop of its own, so this goes to the main
 /// queue rather than running inside a GPUI update.
-pub fn show(view: usize, at: (f64, f64), items: Vec<Item>, tx: flume::Sender<usize>) {
+pub fn show(view: crate::capture::ViewRef, at: (f64, f64), items: Vec<Item>, tx: flume::Sender<usize>) {
     dispatch2::DispatchQueue::main().exec_async(move || {
         let mtm = MainThreadMarker::new().expect("main queue");
-        // SAFETY: GPUI's AppKit handle is its NSView, alive while its window
-        // is; the window asked for this menu a moment ago.
-        let view: &NSView = unsafe { &*(view as *const NSView) };
+        let view = view.get();
         if view.window().is_none() {
             return;
         }

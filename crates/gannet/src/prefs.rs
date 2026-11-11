@@ -58,6 +58,17 @@ pub fn save(cx: &mut App) {
     }
 }
 
+/// Save changed settings; not yet during the first onboarding, which saves
+/// them at its end (a file there means Gannet has been set up).
+fn keep(settings: &Settings, cx: &mut App) {
+    if !cx.global::<Prefs>().live && !set_up_before() {
+        return;
+    }
+    if let Err(e) = settings.save(&settings::settings_path()) {
+        capture::notify("Couldn't save Gannet's settings", &e, cx);
+    }
+}
+
 pub fn get(cx: &App) -> &Settings {
     &cx.global::<Prefs>().settings
 }
@@ -74,9 +85,7 @@ pub fn update(cx: &mut App, f: impl FnOnce(&mut Settings)) {
     if settings == *get(cx) {
         return reapply(cx);
     }
-    if let Err(e) = settings.save(&settings::settings_path()) {
-        capture::notify("Couldn't save Gannet's settings", &e, cx);
-    }
+    keep(&settings, cx);
     cx.global_mut::<Prefs>().settings = settings;
     reapply(cx);
 }
@@ -89,9 +98,7 @@ pub fn remember(cx: &mut App, f: impl FnOnce(&mut Settings)) {
     if settings == *get(cx) {
         return;
     }
-    if let Err(e) = settings.save(&settings::settings_path()) {
-        capture::notify("Couldn't save Gannet's settings", &e, cx);
-    }
+    keep(&settings, cx);
     cx.global_mut::<Prefs>().settings = settings;
 }
 

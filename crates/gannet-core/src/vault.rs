@@ -50,6 +50,8 @@ const TRASH_FILE: &str = "trash.gmeta";
 const TRASH_ID: &str = "trash";
 /// Held while the trash file is read and written again.
 static TRASH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// One write of the folders file at a time.
+static FOLDERS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// A thumbnail's longest side, in pixels.
 pub const THUMB: u32 = 480;
 
@@ -198,15 +200,15 @@ impl Vault {
             let _ = std::fs::remove_file(self.paste_path(id, n));
         }
         let edits_path = self.path(id, EDITS_EXT);
-        if edits.is_empty() {
-            let _ = std::fs::remove_file(&edits_path);
-        } else {
+        if !edits.is_empty() {
             let bytes = self.seal(&format!("{id}/edits"), &edits.to_json())?;
             self.ensure_dir()?;
             store::write_private(&edits_path, &bytes)?;
         }
         self.write(id, img, png, scale)?;
+        // Back to a plain capture only once its image is the plain one.
         if edits.is_empty() {
+            let _ = std::fs::remove_file(&edits_path);
             let _ = std::fs::remove_file(&orig);
         }
         Ok(())
@@ -270,6 +272,7 @@ impl Vault {
     }
 
     pub fn save_folders(&self, folders: &Folders) -> Result<(), String> {
+        let _held = FOLDERS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         self.write_meta(FOLDERS_FILE, FOLDERS_ID, &folders.to_json())
     }
 
@@ -305,16 +308,34 @@ impl Vault {
 
     /// Delete captures `ids` in the trash for good.
     pub fn delete_for_good(&self, ids: &[String]) -> Result<(), String> {
-        ids.iter().try_for_each(|id| self.delete(id))?;
-        self.change_trash(|t| ((), ids.iter().fold(false, |ch, id| t.take(id).is_some() | ch)))
+        self.change_trash(|t| self.drop_from(t, ids))?.map(|_| ())
     }
 
     /// Delete for good what has been in the trash more than `max_age_ms`
     /// before `now_ms`; how many.
     pub fn empty_trash(&self, max_age_ms: i64, now_ms: i64) -> Result<usize, String> {
-        let old = self.trash()?.expired(max_age_ms, now_ms);
-        self.delete_for_good(&old)?;
-        Ok(old.len())
+        // Picked under the lock, so a capture put back meanwhile stays.
+        self.change_trash(|t| {
+            let old = t.expired(max_age_ms, now_ms);
+            self.drop_from(t, &old)
+        })?
+    }
+
+    /// Delete `ids` and take them out of trash `t`; the trash forgets
+    /// those that went even if one couldn't. How many went, and whether
+    /// `t` changed.
+    fn drop_from(&self, t: &mut Trash, ids: &[String]) -> (Result<usize, String>, bool) {
+        let mut failed = None;
+        let mut gone = 0;
+        for id in ids {
+            match self.delete(id) {
+                Ok(()) => gone += usize::from(t.take(id).is_some()),
+                Err(e) => {
+                    failed.get_or_insert(e);
+                },
+            }
+        }
+        (failed.map_or(Ok(gone), Err), gone > 0)
     }
 
     /// A small sealed file of the library's own, if there is one.
@@ -347,9 +368,16 @@ impl Vault {
     }
 
     /// Delete the captures taken more than `max_age_ms` before `now_ms`;
-    /// how many went.
-    pub fn prune(&self, max_age_ms: i64, now_ms: i64) -> usize {
-        self.list().into_iter().filter(|e| now_ms - e.taken_ms > max_age_ms).filter(|e| self.delete(&e.id).is_ok()).count()
+    /// how many went. Those in the trash wait for the trash's own limit,
+    /// `open` (being edited) stays, and none goes while the trash can't be
+    /// read.
+    pub fn prune(&self, max_age_ms: i64, now_ms: i64, open: Option<&str>) -> usize {
+        let Ok(trash) = self.trash() else { return 0 };
+        self.list()
+            .into_iter()
+            .filter(|e| now_ms - e.taken_ms > max_age_ms && !trash.contains(&e.id) && Some(e.id.as_str()) != open)
+            .filter(|e| self.delete(&e.id).is_ok())
+            .count()
     }
 
     fn path(&self, id: &str, ext: &str) -> PathBuf {
@@ -692,9 +720,15 @@ mod tests {
         let img = RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]));
         let a = v.add(&img, 1.).unwrap();
         let b = v.add(&img, 1.).unwrap();
-        assert_eq!(v.prune(1000, b.taken_ms + 10), 0);
-        assert_eq!(v.prune(1000, a.taken_ms + 5000).min(2), 2);
-        assert!(v.list().is_empty());
+        assert_eq!(v.prune(1000, b.taken_ms + 10, None), 0);
+        // One in the trash waits for the trash to drop it.
+        v.to_trash(&[(a.id.clone(), None)], a.taken_ms).unwrap();
+        assert_eq!(v.prune(1000, a.taken_ms + 5000, None), 1);
+        assert_eq!(v.list(), vec![a.clone()]);
+        // Nor does the one being edited.
+        v.restore(std::slice::from_ref(&a.id)).unwrap();
+        assert_eq!(v.prune(1000, a.taken_ms + 5000, Some(&a.id)), 0);
+        assert_eq!(v.prune(1000, a.taken_ms + 5000, None), 1);
         let _ = std::fs::remove_dir_all(v.dir());
     }
 

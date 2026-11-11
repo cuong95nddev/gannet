@@ -427,7 +427,7 @@ impl SettingsView {
 
     fn folder_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.stop(cx);
-        let Some(view) = capture::ns_view(window) else { return };
+        let Some(view) = capture::ViewRef::of(window) else { return };
         let settings = prefs::get(cx);
         let custom = settings.save_dir.clone();
         let default = store::captures_dir();
@@ -452,7 +452,7 @@ impl SettingsView {
         let b = self.folder_button.get();
         let at = (f64::from(b.origin.x.as_f32()) + 4., f64::from(b.origin.y.as_f32()) + 2.);
         let (tx, rx) = flume::bounded(1);
-        popup_menu::show(view.as_ptr() as usize, at, items, tx);
+        popup_menu::show(view, at, items, tx);
         cx.spawn_in(window, async move |this, cx| {
             let Ok(i) = rx.recv_async().await else { return };
             let Some(&choice) = choices.get(i) else { return };
@@ -927,7 +927,9 @@ impl SettingsView {
                             .text_color(pal.secondary)
                             .child("macOS applies Screen Recording when Gannet starts: after allowing it, reopen Gannet."),
                     )
-                    .child(push_button("relaunch", pal).child("Reopen Gannet").on_click(|_, _, cx| permissions::relaunch(true, cx)))
+                    .child(push_button("relaunch", pal).child("Reopen Gannet").on_click(|_, _, cx| {
+                        permissions::relaunch(true, cx);
+                    }))
                     .into_any_element(),
             );
         }

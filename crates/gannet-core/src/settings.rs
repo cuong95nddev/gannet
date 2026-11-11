@@ -373,9 +373,9 @@ pub struct Settings {
 #[serde(rename_all = "snake_case")]
 pub enum ToolbarPlace {
     /// Floating above every window, where it was dragged.
-    #[default]
     Floating,
     /// Under the menu bar icon, shown by clicking the icon.
+    #[default]
     MenuBar,
 }
 
@@ -396,7 +396,7 @@ impl Default for Settings {
             shortcuts: Shortcuts::default(),
             save_dir: None,
             toolbar: true,
-            toolbar_place: ToolbarPlace::Floating,
+            toolbar_place: ToolbarPlace::MenuBar,
             keep_days: None,
             open_editor: false,
             layers: true,
@@ -412,16 +412,32 @@ impl Settings {
     }
 
     /// The settings in `path`: the defaults if there is no file, and an
-    /// error (with the defaults to go on with) if it can't be read.
+    /// error if it can't be read. Values it can't read are left at their
+    /// defaults, keeping the others, and the file is copied beside itself
+    /// (`.bad`) before it is saved over.
     pub fn load(path: &Path) -> (Settings, Option<String>) {
         match std::fs::read_to_string(path) {
             Ok(text) => match serde_json::from_str(&text) {
                 Ok(s) => (s, None),
-                Err(e) => (Settings::default(), Some(format!("{}: {e}", path.display()))),
+                Err(e) => {
+                    let mut bad = path.as_os_str().to_owned();
+                    bad.push(".bad");
+                    let _ = std::fs::copy(path, bad);
+                    let kept = serde_json::from_str(&text).ok().and_then(Settings::lenient).unwrap_or_default();
+                    (kept, Some(format!("{}: {e}", path.display())))
+                },
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Settings::default(), None),
             Err(e) => (Settings::default(), Some(format!("{}: {e}", path.display()))),
         }
+    }
+
+    /// The settings in `file`, each value that can't be read left at its
+    /// default; `None` if `file` isn't an object.
+    fn lenient(file: serde_json::Value) -> Option<Settings> {
+        let mut kept = serde_json::to_value(Settings::default()).ok()?;
+        merge(&mut kept, &[], file)?;
+        serde_json::from_value(kept).ok()
     }
 
     /// Write to `path`, through a temporary file so a crash never leaves
@@ -433,6 +449,32 @@ impl Settings {
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         store::write_private(path, (text + "\n").as_bytes())
     }
+}
+
+/// Put each value of object `from` into the object at `at` in `root`
+/// where `Settings` can still be read with it, going into objects (the
+/// shortcuts) one value at a time.
+fn merge(root: &mut serde_json::Value, at: &[String], from: serde_json::Value) -> Option<()> {
+    let serde_json::Value::Object(from) = from else { return None };
+    for (key, value) in from {
+        let old = object_at(root, at)?.insert(key.clone(), value.clone());
+        if serde_json::from_value::<Settings>(root.clone()).is_ok() {
+            continue;
+        }
+        let obj = object_at(root, at)?;
+        match old {
+            Some(old) => obj.insert(key.clone(), old),
+            None => obj.remove(&key),
+        };
+        if value.is_object() && obj.get(&key).is_some_and(|v| v.is_object()) {
+            merge(root, &[at, &[key]].concat(), value);
+        }
+    }
+    Some(())
+}
+
+fn object_at<'a>(root: &'a mut serde_json::Value, at: &[String]) -> Option<&'a mut serde_json::Map<String, serde_json::Value>> {
+    at.iter().try_fold(root, |v, k| v.get_mut(k))?.as_object_mut()
 }
 
 /// `~/Library/Application Support/dev.gannet/settings.json`.
@@ -513,11 +555,29 @@ mod tests {
     }
 
     #[test]
-    fn toolbar_place_defaults_to_floating() {
+    fn a_bad_value_keeps_the_others() {
+        let dir = std::env::temp_dir().join(format!("gannet-settings-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let text = r#"{"save_dir":"/tmp/caps","keep_days":7,"trash_days":"lots","shortcuts":{"region":"Cmd+Shift+Nope","window":null}}"#;
+        std::fs::write(&path, text).unwrap();
+        let (s, err) = Settings::load(&path);
+        assert!(err.is_some());
+        assert_eq!(s.save_dir, Some(PathBuf::from("/tmp/caps")));
+        assert_eq!(s.keep_days, Some(7));
+        assert_eq!(s.trash_days, Settings::default().trash_days);
+        assert_eq!(s.shortcuts.region, Shortcuts::default().region);
+        assert_eq!(s.shortcuts.window, None);
+        assert_eq!(std::fs::read_to_string(dir.join("settings.json.bad")).unwrap(), text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn toolbar_place_defaults_to_menu_bar() {
         let s: Settings = serde_json::from_str(r#"{"toolbar":true}"#).unwrap();
-        assert_eq!(s.toolbar_place, ToolbarPlace::Floating);
-        let s: Settings = serde_json::from_str(r#"{"toolbar_place":"menu_bar"}"#).unwrap();
         assert_eq!(s.toolbar_place, ToolbarPlace::MenuBar);
+        let s: Settings = serde_json::from_str(r#"{"toolbar_place":"floating"}"#).unwrap();
+        assert_eq!(s.toolbar_place, ToolbarPlace::Floating);
     }
 
     #[test]

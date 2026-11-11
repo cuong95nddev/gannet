@@ -39,11 +39,12 @@ enum Item {
     OpenFiles,
     OpenClipboard,
     Library,
+    Settings,
     Hide,
     Separator,
 }
 
-const ITEMS: [Item; 10] = [
+const ITEMS: [Item; 11] = [
     Item::Capture(Action::Region, Mode::Region, IconName::Scan),
     Item::Capture(Action::Window, Mode::Window, IconName::AppWindow),
     Item::Capture(Action::Screen, Mode::Screen, IconName::Monitor),
@@ -53,6 +54,7 @@ const ITEMS: [Item; 10] = [
     Item::OpenClipboard,
     Item::Separator,
     Item::Library,
+    Item::Settings,
     Item::Hide,
 ];
 
@@ -77,6 +79,7 @@ impl Item {
             Item::OpenFiles => "Open image files…".to_owned(),
             Item::OpenClipboard => "New from the clipboard".to_owned(),
             Item::Library => "Open Library".to_owned(),
+            Item::Settings => "Settings…".to_owned(),
             Item::Hide => "Hide".to_owned(),
             Item::Separator => return None,
         })
@@ -254,10 +257,12 @@ fn show(attached: bool, cx: &mut App) {
     let primary = cx.primary_display().map(|d| d.bounds());
     let icon = attached.then(status_item::icon_frame).flatten();
     let origin = match (primary, icon) {
-        // Under the icon, centred on it (AppKit counts from the bottom).
-        (Some(b), Some(f)) => {
+        // Under the icon, centred on it, on the icon's own display (AppKit
+        // counts from the bottom of the primary one).
+        (Some(b), Some((f, screen))) => {
             let x = (f.origin.x + f.size.width / 2.) as f32 - WIDTH / 2.;
-            let x = x.clamp(b.origin.x.as_f32() + 4., (b.origin.x + b.size.width).as_f32() - WIDTH - 4.);
+            let (left, right) = (screen.origin.x as f32 + 4., (screen.origin.x + screen.size.width) as f32 - WIDTH - 4.);
+            let x = x.min(right).max(left);
             point(px(x), b.size.height - px(f.origin.y as f32) + px(6.))
         },
         (Some(b), None) => point(b.origin.x + (b.size.width - px(WIDTH)) / 2., b.origin.y + px(40.)),
@@ -280,8 +285,7 @@ fn show(attached: bool, cx: &mut App) {
             // AppKit calls back into GPUI while the window changes, so
             // after this update, from the main queue.
             let away = !attached && cx.default_global::<Toolbar>().library_open;
-            if let Ok(Some(view)) = handle.update(cx, |_, window, _| capture::ns_view(window)) {
-                let view = view.as_ptr() as usize;
+            if let Ok(Some(view)) = handle.update(cx, |_, window, _| capture::ViewRef::of(window)) {
                 dispatch2::DispatchQueue::main().exec_async(move || float(view, away, attached));
             }
             let monitors = if attached {
@@ -330,14 +334,11 @@ fn watch_clicks(own: Option<isize>, tx: flume::Sender<Command>) -> Vec<ClickMoni
 /// Square (borderless: macOS rounds a titled window's corners), above
 /// other apps' windows but below menus; floating, back where it was left;
 /// off screen if `away` (the library is open).
-fn float(view: usize, away: bool, attached: bool) {
-    use objc2_app_kit::{NSFloatingWindowLevel, NSView};
+fn float(view: capture::ViewRef, away: bool, attached: bool) {
+    use objc2_app_kit::NSFloatingWindowLevel;
     use objc2_foundation::NSString;
 
-    // SAFETY: GPUI's AppKit handle is its NSView, still open: this runs on
-    // the main queue right after the window opened.
-    let view: &NSView = unsafe { &*(view as *const NSView) };
-    let Some(window) = view.window() else { return };
+    let Some(window) = view.get().window() else { return };
     let frame = window.frame();
     crate::capture::borderless(&window);
     window.setFrame_display(frame, true);
@@ -476,6 +477,12 @@ impl Render for ToolbarView {
                 Item::Library => button(i, IconName::Images)
                     .on_click(move |_, _, cx| {
                         crate::send(cx, Command::OpenLibrary);
+                        done(attached, cx);
+                    })
+                    .into_any_element(),
+                Item::Settings => button(i, IconName::Settings)
+                    .on_click(move |_, _, cx| {
+                        crate::send(cx, Command::OpenSettings);
                         done(attached, cx);
                     })
                     .into_any_element(),

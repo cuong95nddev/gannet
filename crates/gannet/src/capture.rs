@@ -180,7 +180,8 @@ fn pick_window(settle: Duration, cx: &mut App) {
         cx.update(|cx| {
             ended(cx);
             match picked {
-                Ok(Some(img)) => deliver(img, main_screen_scale(), true, cx),
+                // The window was clicked: it is on the display under the pointer.
+                Ok(Some(img)) => deliver(img, pointer_screen_scale(), true, cx),
                 Ok(None) => {},
                 Err(e) => notify("Couldn't capture the window", &e, cx),
             }
@@ -221,8 +222,7 @@ fn open_overlays(grabs: Vec<Grab>, mode: Mode, cx: &mut App) {
             Ok((handle, _)) => {
                 // AppKit calls back into GPUI while the window changes, so
                 // after this update, from the main queue.
-                if let Ok(Some(view)) = handle.update(cx, |_, window, _| ns_view(window)) {
-                    let view = view.as_ptr() as usize;
+                if let Ok(Some(view)) = handle.update(cx, |_, window, _| ViewRef::of(window)) {
                     dispatch2::DispatchQueue::main().exec_async(move || cover_display(view));
                 }
                 overlays.push(handle);
@@ -243,6 +243,28 @@ fn open_overlays(grabs: Vec<Grab>, mode: Mode, cx: &mut App) {
     cx.global_mut::<Capture>().overlays = overlays;
 }
 
+/// A window's NSView, kept alive until dropped, to use on the main queue
+/// (as `exec_async` wants, sent there, though only the main thread may
+/// touch it).
+pub(crate) struct ViewRef(dispatch2::MainThreadBound<objc2::rc::Retained<objc2_app_kit::NSView>>);
+
+impl ViewRef {
+    /// `window`'s NSView. Main thread only.
+    pub(crate) fn of(window: &Window) -> Option<Self> {
+        let mtm = objc2::MainThreadMarker::new()?;
+        let view = ns_view(window)?;
+        // SAFETY: GPUI's AppKit handle is its NSView, alive while the
+        // window is (now): retained here, it stays alive after.
+        let view = unsafe { objc2::rc::Retained::retain(view.cast::<objc2_app_kit::NSView>().as_ptr()) }?;
+        Some(ViewRef(dispatch2::MainThreadBound::new(view, mtm)))
+    }
+
+    /// The view; on the main thread, as the main queue's blocks are.
+    pub(crate) fn get(&self) -> &objc2_app_kit::NSView {
+        self.0.get(objc2::MainThreadMarker::new().expect("on the main thread"))
+    }
+}
+
 /// The window's NSView (AppKit's raw handle).
 pub(crate) fn ns_view(window: &Window) -> Option<std::ptr::NonNull<std::ffi::c_void>> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -256,13 +278,11 @@ pub(crate) fn ns_view(window: &Window) -> Option<std::ptr::NonNull<std::ffi::c_v
 /// GPUI's pop-up is a titled panel, and AppKit keeps a titled window's
 /// frame below the menu bar whatever its level. Borderless, it isn't
 /// (GPUI's panel class can still become key, so keys reach the overlay).
-fn cover_display(view: usize) {
-    use objc2_app_kit::{NSScreenSaverWindowLevel, NSView};
+fn cover_display(view: ViewRef) {
+    use objc2_app_kit::NSScreenSaverWindowLevel;
 
-    // SAFETY: GPUI's AppKit handle is its NSView. This runs on the main
-    // queue right after the window opened, before anything can close it.
-    let view: &NSView = unsafe { &*(view as *const NSView) };
-    let Some(ns_window) = view.window() else { return };
+    // Closed already (Esc at once): nothing to do.
+    let Some(ns_window) = view.get().window() else { return };
     let Some(screen) = ns_window.screen() else { return };
     crate::capture::borderless(&ns_window);
     ns_window.setLevel(NSScreenSaverWindowLevel);
@@ -290,7 +310,14 @@ pub fn close(cx: &mut App) {
 /// Close the overlays, the capture going on without them (a scrolling
 /// capture, which calls [`ended`] when it is over).
 pub fn hand_over(cx: &mut App) {
-    cx.defer(remove_overlays);
+    cx.defer(|cx| {
+        remove_overlays(cx);
+        // Gannet came to the front for the overlays: give the focus back
+        // to the app being scrolled, or AppKit brings up the library.
+        if let Some(app) = &cx.global::<Capture>().before {
+            app.activateWithOptions(objc2_app_kit::NSApplicationActivationOptions::empty());
+        }
+    });
 }
 
 fn remove_overlays(cx: &mut App) {
@@ -338,6 +365,21 @@ pub fn deliver_with(make: impl FnOnce() -> RgbaImage + Send + 'static, scale: f3
 pub(crate) fn main_screen_scale() -> f32 {
     let Some(mtm) = objc2::MainThreadMarker::new() else { return 2. };
     objc2_app_kit::NSScreen::mainScreen(mtm).map_or(2., |s| s.backingScaleFactor() as f32)
+}
+
+/// The pixels per point of the display under the pointer (the main one's
+/// if none is).
+fn pointer_screen_scale() -> f32 {
+    use objc2_app_kit::{NSEvent, NSScreen};
+    let Some(mtm) = objc2::MainThreadMarker::new() else { return main_screen_scale() };
+    let at = NSEvent::mouseLocation();
+    NSScreen::screens(mtm)
+        .iter()
+        .find(|s| {
+            let f = s.frame();
+            (f.origin.x..f.origin.x + f.size.width).contains(&at.x) && (f.origin.y..=f.origin.y + f.size.height).contains(&at.y)
+        })
+        .map_or_else(main_screen_scale, |s| s.backingScaleFactor() as f32)
 }
 
 /// The file types a capture can be saved as.

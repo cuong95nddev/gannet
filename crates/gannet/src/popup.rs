@@ -40,7 +40,7 @@ pub fn open<V: Render + 'static>(
     cx: &mut App,
     build: impl FnOnce(&mut Window, &mut Context<V>) -> V,
 ) -> Option<Popup> {
-    let parent_view = capture::ns_view(parent)?.as_ptr() as usize;
+    let parent_view = capture::ViewRef::of(parent)?;
     let display = parent.display(cx).map(|d| d.id());
     let options = WindowOptions {
         // Placed for real below, from AppKit's frames.
@@ -59,7 +59,7 @@ pub fn open<V: Render + 'static>(
     let (window, _) = gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| build(window, cx)))
         .map_err(|e| log::error!("can't open a popup: {e}"))
         .ok()?;
-    let view = window.update(cx, |_, w, _| capture::ns_view(w)).ok()??.as_ptr() as usize;
+    let view = window.update(cx, |_, w, _| capture::ViewRef::of(w)).ok()??;
     let anchor = (
         f64::from(anchor.origin.x.as_f32()),
         f64::from(anchor.origin.y.as_f32()),
@@ -89,11 +89,9 @@ impl Popup {
 
 /// Make the popup borderless, place it by its anchor and show it as a
 /// child of the parent.
-fn attach(parent_view: usize, view: usize, anchor: (f64, f64, f64, f64), size: (f64, f64), kind: Kind) {
-    // SAFETY: GPUI's AppKit handles are their NSViews; this runs on the
-    // main queue right after the popup opened, before anything closed it.
-    let (parent_view, view): (&NSView, &NSView) = unsafe { (&*(parent_view as *const NSView), &*(view as *const NSView)) };
-    let (Some(parent), Some(popup)) = (parent_view.window(), view.window()) else { return };
+fn attach(parent_view: capture::ViewRef, view: capture::ViewRef, anchor: (f64, f64, f64, f64), size: (f64, f64), kind: Kind) {
+    // Either closed already (the pointer moved on): nothing to do.
+    let (Some(parent), Some(popup)) = (parent_view.get().window(), view.get().window()) else { return };
     let Some(screen) = parent.screen() else { return };
     let pf = parent.frame();
     // The anchor's top left in AppKit's screen coordinates (y up).

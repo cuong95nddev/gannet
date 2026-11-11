@@ -40,7 +40,14 @@ bin="$dest/Contents/MacOS/gannet"
 
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
-app=$("$ROOT/scripts/bundle.sh" "$STAGE" | tail -1)
+# Its status, not a pipe's: a failed build must stop here, before the
+# installed app is touched.
+out=$("$ROOT/scripts/bundle.sh" "$STAGE")
+app=$(printf '%s\n' "$out" | tail -1)
+if [ ! -d "$app" ]; then
+    echo "error: the build made no app (got: $app)" >&2
+    exit 1
+fi
 
 # macOS keeps privacy permissions per signing identity: a different one
 # (say Apple Development after Developer ID) means granting them again.

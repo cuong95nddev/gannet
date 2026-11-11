@@ -199,7 +199,7 @@ pub fn step(doc: &mut Doc, size: &mut Size, op: &Op) {
         Op::Steps { steps } => steps.iter().for_each(|op| step(doc, size, op)),
         &Op::Crop { x, y, w, h } => {
             doc.shift(p(-x as f32, -y as f32));
-            *size = (w.max(1), h.max(1));
+            *size = fit((w.into(), h.into()));
         },
         &Op::Paste { image, x, y, w, h } => {
             let (w, h) = (i64::from(w.max(1)), i64::from(h.max(1)));
@@ -207,11 +207,23 @@ pub fn step(doc: &mut Doc, size: &mut Size, op: &Op) {
             let (left, top) = (x.min(0), y.min(0));
             let (right, bottom) = ((x + w).max(cw), (y + h).max(ch));
             doc.shift(p(-left as f32, -top as f32));
-            *size = ((right - left) as u32, (bottom - top) as u32);
+            *size = fit((right - left, bottom - top));
             let a = p((x - left) as f32, (y - top) as f32);
             doc.push(Shape::Image { image, a, b: a + p(w as f32, h as f32) });
         },
     }
+}
+
+/// The largest canvas: each side, and its pixels in all (a gigabyte).
+pub const MAX_CANVAS_SIDE: u32 = 32_000;
+pub const MAX_CANVAS_PIXELS: u64 = 1 << 28;
+
+/// A canvas `w` × `h` big, cut down to the largest there may be.
+fn fit((w, h): (i64, i64)) -> Size {
+    let side = i64::from(MAX_CANVAS_SIDE);
+    let (w, h) = (w.clamp(1, side) as u64, h.clamp(1, side) as u64);
+    let h = h.min((MAX_CANVAS_PIXELS / w).max(1));
+    (w as u32, h as u32)
 }
 
 /// `ops` played on a capture `size` big as taken: its layers, and the
@@ -236,6 +248,15 @@ pub fn render(original: &RgbaImage, ops: &[Op], scale: f32, images: &Images, fon
 mod tests {
     use super::*;
     use crate::model::{COLORS, Style};
+
+    #[test]
+    fn the_canvas_has_a_limit() {
+        let (_, size) = play((10, 10), &[Op::Crop { x: 0, y: 0, w: u32::MAX, h: u32::MAX }], 1.);
+        assert_eq!(size.0, MAX_CANVAS_SIDE);
+        assert!(u64::from(size.0) * u64::from(size.1) <= MAX_CANVAS_PIXELS);
+        let (_, size) = play((10, 10), &[Op::Paste { image: 1, x: -2_000_000_000, y: 0, w: 5, h: 5 }], 1.);
+        assert_eq!(size, (MAX_CANVAS_SIDE, 10));
+    }
 
     fn gray(w: u32, h: u32) -> RgbaImage {
         RgbaImage::from_pixel(w, h, image::Rgba([100, 100, 100, 255]))

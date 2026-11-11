@@ -176,18 +176,15 @@ fn open_window<V: Render + 'static>(
         ..Default::default()
     };
     let (handle, view) = gpui_kit::open_window(options, cx, build).map_err(|e| log::error!("can't open a window: {e}")).ok()?;
-    let ns = handle.update(cx, |_, w, _| capture::ns_view(w)).ok()??.as_ptr() as usize;
+    let ns = handle.update(cx, |_, w, _| capture::ViewRef::of(w)).ok()??;
     // AppKit calls back into GPUI while the window changes, so after this
     // update, from the main queue.
     dispatch2::DispatchQueue::main().exec_async(move || place(ns, rect, passive));
     Some((handle, view))
 }
 
-fn place(view: usize, rect: Rect, passive: bool) {
-    // SAFETY: GPUI's AppKit handle is its NSView; this runs on the main
-    // queue right after the window opened, before anything closed it.
-    let view: &NSView = unsafe { &*(view as *const NSView) };
-    let Some(window) = view.window() else { return };
+fn place(view: capture::ViewRef, rect: Rect, passive: bool) {
+    let Some(window) = view.get().window() else { return };
     crate::capture::borderless(&window);
     window.setFrame_display(rect.ns(), true);
     window.setHasShadow(!passive);
@@ -240,7 +237,9 @@ fn run((x, y, w, h): (f64, f64, f64, f64), scale: f32, cx: &mut App) {
             let keep = cx.try_global::<Session>().and_then(|s| s.stop) != Some(false);
             close(cx);
             if let Some(e) = failed {
-                return capture::notify("Couldn't capture the region", &e, cx);
+                // What was stitched before is kept all the same.
+                let more = if stitcher.is_some() { " What was captured until then is kept." } else { "" };
+                capture::notify("Couldn't capture the region", &format!("{e}{more}"), cx);
             }
             if keep && let Some(st) = stitcher {
                 capture::deliver(st.finish(), scale, true, cx);

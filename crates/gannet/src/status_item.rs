@@ -213,15 +213,17 @@ fn show_menu() {
     });
 }
 
-/// The icon's frame on screen (AppKit's coordinates, from the bottom left
-/// of the main display). Main thread only.
-pub fn icon_frame() -> Option<NSRect> {
+/// The icon's frame on screen, and its display's (AppKit's coordinates,
+/// from the bottom left of the main display). Main thread only.
+pub fn icon_frame() -> Option<(NSRect, NSRect)> {
     UI.with(|u| {
         let ui = u.borrow();
         let ui = ui.as_ref()?;
         let mtm = MainThreadMarker::new()?;
         let button = ui.item.button(mtm)?;
-        Some(button.window()?.frame())
+        let window = button.window()?;
+        let screen = window.screen()?.frame();
+        Some((window.frame(), screen))
     })
 }
 

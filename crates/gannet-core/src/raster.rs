@@ -247,42 +247,57 @@ fn draw(pm: &mut Pixmap, shape: &Shape, off: P, doc: &Doc, font: Option<&FontVec
     }
 }
 
-/// Fill each `block`-sized cell of the rectangle with its average colour.
-fn mosaic(pm: &mut Pixmap, a: P, b: P, block: f32) {
+/// The cells of a mosaic over `a`..`b` on an image `w` × `h` big, each
+/// `[x0, y0, x1, y1]`: `block` pixels square, counted from the mosaic's
+/// corner (so cutting the image elsewhere doesn't move them), and cut to
+/// the image.
+pub fn mosaic_cells(a: P, b: P, (w, h): (i64, i64), block: f32) -> Vec<[i64; 4]> {
     let (lo, hi) = model::norm(a, b);
-    let (w, h) = (pm.width() as i64, pm.height() as i64);
-    let x0 = (lo.x.floor() as i64).clamp(0, w);
-    let y0 = (lo.y.floor() as i64).clamp(0, h);
+    let block = block.round().max(2.) as i64;
+    let (ox, oy) = (lo.x.floor() as i64, lo.y.floor() as i64);
+    let x0 = ox.clamp(0, w);
+    let y0 = oy.clamp(0, h);
     let x1 = (hi.x.ceil() as i64).clamp(0, w);
     let y1 = (hi.y.ceil() as i64).clamp(0, h);
-    let block = block.round().max(2.) as i64;
-    let data = pm.data_mut();
-    let mut by = y0;
+    // The first cell's start at or before the image's edge.
+    let first = |o: i64, start: i64| o + (start - o) / block * block;
+    let mut out = Vec::new();
+    let mut by = first(oy, y0);
     while by < y1 {
-        let ey = (by + block).min(y1);
-        let mut bx = x0;
+        let (sy, ey) = (by.max(y0), (by + block).min(y1));
+        let mut bx = first(ox, x0);
         while bx < x1 {
-            let ex = (bx + block).min(x1);
-            let mut sum = [0u64; 4];
-            for y in by..ey {
-                for x in bx..ex {
-                    let i = ((y * w + x) * 4) as usize;
-                    for c in 0..4 {
-                        sum[c] += u64::from(data[i + c]);
-                    }
-                }
-            }
-            let n = ((ey - by) * (ex - bx)) as u64;
-            let avg = sum.map(|s| (s / n) as u8);
-            for y in by..ey {
-                for x in bx..ex {
-                    let i = ((y * w + x) * 4) as usize;
-                    data[i..i + 4].copy_from_slice(&avg);
-                }
-            }
-            bx = ex;
+            out.push([bx.max(x0), sy, (bx + block).min(x1), ey]);
+            bx += block;
         }
-        by = ey;
+        by += block;
+    }
+    out
+}
+
+/// Fill each `block`-sized cell of the rectangle with its average colour.
+fn mosaic(pm: &mut Pixmap, a: P, b: P, block: f32) {
+    let w = pm.width() as i64;
+    let cells = mosaic_cells(a, b, (w, pm.height() as i64), block);
+    let data = pm.data_mut();
+    for [bx, by, ex, ey] in cells {
+        let mut sum = [0u64; 4];
+        for y in by..ey {
+            for x in bx..ex {
+                let i = ((y * w + x) * 4) as usize;
+                for c in 0..4 {
+                    sum[c] += u64::from(data[i + c]);
+                }
+            }
+        }
+        let n = ((ey - by) * (ex - bx)) as u64;
+        let avg = sum.map(|s| (s / n) as u8);
+        for y in by..ey {
+            for x in bx..ex {
+                let i = ((y * w + x) * 4) as usize;
+                data[i..i + 4].copy_from_slice(&avg);
+            }
+        }
     }
 }
 
@@ -412,6 +427,19 @@ fn draw_text(pm: &mut Pixmap, font: &FontVec, text: &str, at: P, size: f32, colo
 mod tests {
     use super::*;
     use crate::model::{COLORS, Style, p};
+
+    #[test]
+    fn mosaic_cells_stay_put_when_cut() {
+        // Whole: cells from the mosaic's corner at 5.
+        let whole = mosaic_cells(p(5., 5.), p(25., 15.), (100, 100), 8.);
+        assert_eq!(whole[0], [5, 5, 13, 13]);
+        assert_eq!(whole[2], [21, 5, 25, 13]);
+        // Cut 10 px in from the left: the same cells, moved with the image.
+        let cut = mosaic_cells(p(-5., 5.), p(15., 15.), (100, 100), 8.);
+        assert_eq!(cut[0], [0, 5, 3, 13]);
+        assert_eq!(cut[1], [3, 5, 11, 13]);
+        assert!(mosaic_cells(p(200., 0.), p(300., 10.), (100, 100), 8.).is_empty());
+    }
 
     fn gray(w: u32, h: u32) -> RgbaImage {
         RgbaImage::from_pixel(w, h, image::Rgba([100, 100, 100, 255]))

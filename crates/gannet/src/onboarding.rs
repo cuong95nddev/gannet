@@ -137,8 +137,8 @@ impl Onboarding {
     /// carries on in place instead.
     fn finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         prefs::save(cx);
-        if permissions::can_relaunch() {
-            permissions::relaunch(false, cx);
+        // Carries on in place if it can't be reopened.
+        if permissions::relaunch(false, cx) {
             return;
         }
         let start = self.start;

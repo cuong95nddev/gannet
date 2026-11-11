@@ -48,6 +48,7 @@ icon_assets!(
         Redo2,
         Scan,
         ScrollText,
+        Settings,
         ShieldCheck,
         Square,
         SquareDashed,

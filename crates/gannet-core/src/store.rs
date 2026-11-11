@@ -73,20 +73,30 @@ pub fn open(path: &Path) -> Result<RgbaImage, String> {
     Ok(r.decode().map_err(|e| e.to_string())?.into_rgba8())
 }
 
-/// Write `bytes` to `path` through a temporary file beside it, so a crash
-/// never leaves half a file; only the user may read it. The temporary
-/// file is named after the whole file name, so files of one capture never
-/// share it.
+/// Write `bytes` to `path` through a temporary file beside it, on disk
+/// before it takes the file's place, so neither a crash nor a power cut
+/// leaves half a file; only the user may read it. Each write has its own
+/// temporary file (named after the whole file name, and numbered), so two
+/// writes of one file never mix.
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".{}.{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
     let tmp = PathBuf::from(tmp);
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).map_err(|e| e.to_string())?;
-    f.write_all(bytes).map_err(|e| e.to_string())?;
-    drop(f);
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    let written = (|| {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    written.map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })
 }
 
 /// Make folder `dir` if it isn't there, the user's alone (0700); one made

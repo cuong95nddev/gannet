@@ -10,6 +10,7 @@ use image::RgbaImage;
 use lyon_tessellation::{LineCap, LineJoin, StrokeOptions};
 
 use gannet_core::model::{self, MOSAIC_BLOCK, P, Rgba, Shape, p};
+use gannet_core::raster;
 
 pub fn hsla(c: Rgba) -> Hsla {
     gpui_kit::Rgba { r: f32::from(c[0]) / 255., g: f32::from(c[1]) / 255., b: f32::from(c[2]) / 255., a: f32::from(c[3]) / 255. }.into()
@@ -181,9 +182,10 @@ thread_local! {
     static MOSAICS: RefCell<MosaicCache> = const { RefCell::new(MosaicCache(Vec::new())) };
 }
 
-/// The blocks of the mosaic over `x0..x1`, `y0..y1` of `base`.
-fn blocks(base: &Arc<RgbaImage>, block: i64, (x0, y0, x1, y1): (i64, i64, i64, i64)) -> Blocks {
-    let key = [block, x0, y0, x1, y1];
+/// The blocks of the mosaic over `a`..`b` of `base`.
+fn blocks(base: &Arc<RgbaImage>, block: f32, a: P, b: P) -> Blocks {
+    let (lo, hi) = model::norm(a, b);
+    let key = [block.to_bits() as i64, lo.x.to_bits() as i64, lo.y.to_bits() as i64, hi.x.to_bits() as i64, hi.y.to_bits() as i64];
     let cached = MOSAICS.with_borrow(|c| {
         c.0.iter().find(|(w, k, _)| *k == key && w.upgrade().is_some_and(|b| Arc::ptr_eq(&b, base))).map(|(_, _, b)| b.clone())
     });
@@ -192,26 +194,18 @@ fn blocks(base: &Arc<RgbaImage>, block: i64, (x0, y0, x1, y1): (i64, i64, i64, i
     }
     let (w, raw) = (base.width() as usize, base.as_raw());
     let mut out = Vec::new();
-    let mut by = y0;
-    while by < y1 {
-        let ey = (by + block).min(y1);
-        let mut bx = x0;
-        while bx < x1 {
-            let ex = (bx + block).min(x1);
-            let mut sum = [0u64; 4];
-            for y in by..ey {
-                let row = &raw[(y as usize * w + bx as usize) * 4..(y as usize * w + ex as usize) * 4];
-                for px in row.as_chunks::<4>().0 {
-                    for c in 0..4 {
-                        sum[c] += u64::from(px[c]);
-                    }
+    for [bx, by, ex, ey] in raster::mosaic_cells(lo, hi, (base.width() as i64, base.height() as i64), block) {
+        let mut sum = [0u64; 4];
+        for y in by..ey {
+            let row = &raw[(y as usize * w + bx as usize) * 4..(y as usize * w + ex as usize) * 4];
+            for px in row.as_chunks::<4>().0 {
+                for c in 0..4 {
+                    sum[c] += u64::from(px[c]);
                 }
             }
-            let n = ((ey - by) * (ex - bx)) as u64;
-            out.push(([bx, by, ex, ey], sum.map(|s| (s / n) as u8)));
-            bx = ex;
         }
-        by = ey;
+        let n = ((ey - by) * (ex - bx)) as u64;
+        out.push(([bx, by, ex, ey], sum.map(|s| (s / n) as u8)));
     }
     let out = Rc::new(out);
     MOSAICS.with_borrow_mut(|c| {
@@ -226,14 +220,8 @@ fn blocks(base: &Arc<RgbaImage>, block: i64, (x0, y0, x1, y1): (i64, i64, i64, i
 
 /// The mosaic as it will be exported, from `base`.
 fn mosaic(view: View, a: P, b: P, base: &Arc<RgbaImage>, window: &mut Window) {
-    let (lo, hi) = model::norm(a, b);
-    let (iw, ih) = (base.width() as i64, base.height() as i64);
-    let block = (MOSAIC_BLOCK * view.scale).round().max(2.) as i64;
-    let x0 = (lo.x.floor() as i64).clamp(0, iw);
-    let y0 = (lo.y.floor() as i64).clamp(0, ih);
-    let x1 = (hi.x.ceil() as i64).clamp(0, iw);
-    let y1 = (hi.y.ceil() as i64).clamp(0, ih);
-    for ([bx, by, ex, ey], color) in blocks(base, block, (x0, y0, x1, y1)).iter() {
+    let block = MOSAIC_BLOCK * view.scale;
+    for ([bx, by, ex, ey], color) in blocks(base, block, a, b).iter() {
         let cell = Bounds::from_corners(view.pt(p(*bx as f32, *by as f32)), view.pt(p(*ex as f32, *ey as f32)));
         window.paint_quad(fill(cell, hsla(*color)));
     }

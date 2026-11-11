@@ -161,14 +161,19 @@ impl Overlay {
         }))
     }
 
-    fn on_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let q = from_point(ev.position);
-        let at = self.to_px(q);
+    fn on_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The region stays on this display, though the pointer may not.
+        let size = window.viewport_size();
+        let (w, h) = (size.width.as_f32(), size.height.as_f32());
+        let raw = from_point(ev.position);
+        let q = p(raw.x.clamp(0., w), raw.y.clamp(0., h));
+        let at = self.to_px(raw);
         let Some(drag) = &mut self.drag else { return };
         match drag {
             Drag::Select { start } => self.sel = Some(model::norm(*start, q)),
             Drag::Move { grab, orig } => {
-                let d = q - *grab;
+                let d = raw - *grab;
+                let d = p(d.x.min(w - orig.1.x).max(-orig.0.x), d.y.min(h - orig.1.y).max(-orig.0.y));
                 self.sel = Some((orig.0 + d, orig.1 + d));
             },
             Drag::Resize { handle, orig } => {
@@ -254,6 +259,10 @@ impl Overlay {
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.focus.is_focused(window) {
+            // Esc in the text box ends the typing (the next one cancels).
+            if ev.keystroke.key == "escape" && self.text.is_some() {
+                self.commit_text(window, cx);
+            }
             return;
         }
         let ks = &ev.keystroke;
@@ -309,12 +318,11 @@ impl Overlay {
     fn exporter(&self) -> Option<impl FnOnce() -> RgbaImage + Send + 'static> {
         let (lo, hi) = self.sel?;
         let (lo, hi) = (self.to_px(lo), self.to_px(hi));
-        let crop = Crop {
-            x: lo.x.max(0.).round() as u32,
-            y: lo.y.max(0.).round() as u32,
-            w: (hi.x - lo.x).round().max(1.) as u32,
-            h: (hi.y - lo.y).round().max(1.) as u32,
-        };
+        // Only what is on the display: cut at its edges, not shifted.
+        let (bw, bh) = (self.base.width() as f32, self.base.height() as f32);
+        let (x0, y0) = (lo.x.clamp(0., bw).round(), lo.y.clamp(0., bh).round());
+        let (x1, y1) = (hi.x.clamp(0., bw).round(), hi.y.clamp(0., bh).round());
+        let crop = Crop { x: x0 as u32, y: y0 as u32, w: (x1 - x0).max(1.) as u32, h: (y1 - y0).max(1.) as u32 };
         let (base, doc) = (self.base.clone(), self.doc.clone());
         Some(move || raster::render(&base, crop, &doc, raster::font()))
     }
@@ -430,22 +438,16 @@ impl Overlay {
     /// there is no room), the style bar by it while a drawing tool is
     /// picked, and the text box being typed in.
     fn bars(&self, (lo, hi): (P, P), (w, h): (f32, f32), cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let styled = self.tool.is_some_and(|t| t != Tool::Mosaic);
-        let need = BAR_H + if styled { STYLE_H + 6. } else { 0. } + 10.;
-        let below = hi.y + need <= h;
-        let bar_y = if below {
-            hi.y + 8.
-        } else if lo.y - need >= 0. {
-            lo.y - 8. - BAR_H
-        } else {
-            hi.y - 8. - BAR_H
-        };
-        let right = (w - hi.x).min(w - BAR_W - 8.).max(8.);
+        let styled = !self.scroll && self.tool.is_some_and(|t| t != Tool::Mosaic);
+        let bar_w = if self.scroll { SCROLL_BAR_W } else { BAR_W };
+        let place = place_bars((lo, hi), (w, h), bar_w, styled);
+        let bar_y = place.y;
         let stop = |_: &MouseDownEvent, _: &mut Window, cx: &mut App| cx.stop_propagation();
         if self.scroll {
-            let toolbar = bar()
+            let toolbar = place
+                .x
+                .apply(bar())
                 .top(px(bar_y))
-                .right(px((w - hi.x).min(w - SCROLL_BAR_W - 8.).max(8.)))
                 .h(px(BAR_H))
                 .occlude()
                 .on_mouse_down(MouseButton::Left, stop)
@@ -461,7 +463,7 @@ impl Overlay {
             return vec![toolbar.into_any_element()];
         }
 
-        let mut toolbar = bar().top(px(bar_y)).right(px(right)).h(px(BAR_H)).occlude().on_mouse_down(MouseButton::Left, stop);
+        let mut toolbar = place.x.apply(bar()).top(px(bar_y)).h(px(BAR_H)).occlude().on_mouse_down(MouseButton::Left, stop);
         for (i, tool) in Tool::ALL.into_iter().enumerate() {
             let (name, hint) = tool_label(tool);
             toolbar = toolbar.child(icon_button(("tool", i), name, self.tool == Some(tool), true).tooltip(tip(hint)).on_click(
@@ -515,7 +517,7 @@ impl Overlay {
             const MENU_W: f32 = 150.;
             let menu_h = ROW_H * capture::Format::ALL.len() as f32 + 8.;
             // Away from the region: under the bar if it sits below it.
-            let top = if bar_y > lo.y { bar_y + BAR_H + 4. } else { bar_y - 4. - menu_h };
+            let top = if place.down { bar_y + BAR_H + 4. } else { bar_y - 4. - menu_h };
             let top = top.clamp(0., (h - menu_h).max(0.));
             let left = (at.x - MENU_W / 2.).clamp(4., (w - MENU_W - 4.).max(4.));
             let mut menu = bar()
@@ -551,8 +553,8 @@ impl Overlay {
         }
 
         if styled {
-            let style_y = if below || bar_y > lo.y { bar_y + BAR_H + 6. } else { bar_y - 6. - STYLE_H };
-            let mut style_bar = bar().top(px(style_y)).right(px(right)).h(px(STYLE_H)).occlude().on_mouse_down(MouseButton::Left, stop);
+            let style_y = if place.down { bar_y + BAR_H + 6. } else { bar_y - 6. - STYLE_H };
+            let mut style_bar = place.x.apply(bar()).top(px(style_y)).h(px(STYLE_H)).occlude().on_mouse_down(MouseButton::Left, stop);
             for size in 0..3u8 {
                 style_bar =
                     style_bar.child(size_dot(size, self.style.size == size).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -589,6 +591,57 @@ impl Overlay {
         }
         out
     }
+}
+
+/// Where a bar's left or right edge sits on the overlay.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Edge {
+    Left(f32),
+    Right(f32),
+}
+
+impl Edge {
+    fn apply(self, bar: Div) -> Div {
+        match self {
+            Edge::Left(x) => bar.left(px(x)),
+            Edge::Right(x) => bar.right(px(x)),
+        }
+    }
+}
+
+/// Where the toolbar goes, with the style bar stacked under it (`down`)
+/// or over it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BarsAt {
+    y: f32,
+    x: Edge,
+    down: bool,
+}
+
+/// Place the bars (`bar_w` wide; with the style bar if `styled`) off the
+/// region `(lo, hi)` on a `w` × `h` overlay: under it, else over it, else
+/// beside it at its bottom, right then left; inside its bottom right
+/// corner only when none of those fit.
+fn place_bars((lo, hi): (P, P), (w, h): (f32, f32), bar_w: f32, styled: bool) -> BarsAt {
+    let stack = BAR_H + if styled { STYLE_H + 6. } else { 0. };
+    let need = stack + 10.;
+    // Under or over the region, its right edge on the region's.
+    let under = Edge::Right((w - hi.x).min(w - bar_w - 8.).max(8.));
+    if hi.y + need <= h {
+        return BarsAt { y: hi.y + 8., x: under, down: true };
+    }
+    if lo.y - need >= 0. {
+        return BarsAt { y: lo.y - 8. - BAR_H, x: under, down: false };
+    }
+    // Beside the region, the stack's bottom on the region's (on screen).
+    let y = (hi.y.min(h) - 8. - stack).max(8.);
+    if w - hi.x >= bar_w + 16. {
+        return BarsAt { y, x: Edge::Left(hi.x + 8.), down: true };
+    }
+    if lo.x >= bar_w + 16. {
+        return BarsAt { y, x: Edge::Right(w - lo.x + 8.), down: true };
+    }
+    BarsAt { y, x: under, down: true }
 }
 
 /// What the canvas paints: the dimmed surroundings, the shapes clipped to
@@ -629,5 +682,44 @@ impl Scene {
             window.paint_quad(fill(b, gpui_kit::white()));
             window.paint_quad(outline(b, self.accent, BorderStyle::Solid));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `gpui_kit::*` brings a `test` macro of its own.
+    const SCREEN: (f32, f32) = (1440., 900.);
+
+    #[::core::prelude::v1::test]
+    fn under_the_region_when_there_is_room() {
+        let at = place_bars((p(100., 100.), p(800., 500.)), SCREEN, BAR_W, false);
+        assert_eq!(at, BarsAt { y: 508., x: Edge::Right(640.), down: true });
+    }
+
+    #[::core::prelude::v1::test]
+    fn over_the_region_at_the_bottom_of_the_screen() {
+        let at = place_bars((p(900., 500.), p(1440., 900.)), SCREEN, BAR_W, true);
+        assert_eq!(at, BarsAt { y: 500. - 8. - BAR_H, x: Edge::Right(8.), down: false });
+    }
+
+    #[::core::prelude::v1::test]
+    fn beside_a_region_as_tall_as_the_screen() {
+        // Bottom right corner, full height: the bars go to its left.
+        let at = place_bars((p(900., 0.), p(1440., 900.)), SCREEN, BAR_W, true);
+        assert_eq!(at.x, Edge::Right(1440. - 900. + 8.));
+        assert_eq!(at.y, 900. - 8. - BAR_H - STYLE_H - 6.);
+        // Bottom left corner: to its right.
+        let at = place_bars((p(0., 0.), p(500., 900.)), SCREEN, BAR_W, false);
+        assert_eq!(at, BarsAt { y: 900. - 8. - BAR_H, x: Edge::Left(508.), down: true });
+    }
+
+    #[::core::prelude::v1::test]
+    fn inside_only_when_nothing_else_fits() {
+        let at = place_bars((p(0., 0.), p(1440., 900.)), SCREEN, BAR_W, true);
+        assert_eq!(at.x, Edge::Right(8.));
+        // The style bar under the toolbar stays on screen.
+        assert!(at.y + BAR_H + 6. + STYLE_H <= 900.);
     }
 }

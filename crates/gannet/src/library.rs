@@ -78,6 +78,44 @@ const HANDLE: f32 = 7.;
 static VAULT_WRITES: std::sync::Mutex<Option<HashMap<String, u64>>> = std::sync::Mutex::new(None);
 /// Counts saves, so they can be told apart by age.
 static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The saves not yet written, by capture (and the folders'): opening a
+/// capture waits for its own, and quitting for all of them.
+static UNSAVED: std::sync::Mutex<Option<HashMap<String, usize>>> = std::sync::Mutex::new(None);
+static SAVED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// A save of capture `.0` under way, counted in [`UNSAVED`] until dropped.
+struct Saving(String);
+
+impl Saving {
+    fn new(id: &str) -> Self {
+        let mut unsaved = UNSAVED.lock().unwrap_or_else(|e| e.into_inner());
+        *unsaved.get_or_insert_default().entry(id.to_owned()).or_default() += 1;
+        Saving(id.to_owned())
+    }
+}
+
+impl Drop for Saving {
+    fn drop(&mut self) {
+        let mut unsaved = UNSAVED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(map) = unsaved.as_mut()
+            && let Some(n) = map.get_mut(&self.0)
+        {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.0);
+            }
+        }
+        SAVED.notify_all();
+    }
+}
+
+/// Wait until the saves of capture `id` (every capture's, for `None`) are
+/// written, `limit` at most.
+fn wait_saved(id: Option<&str>, limit: Duration) {
+    let unsaved = UNSAVED.lock().unwrap_or_else(|e| e.into_inner());
+    let busy = |m: &mut Option<HashMap<String, usize>>| m.as_ref().is_some_and(|m| id.map_or(!m.is_empty(), |id| m.contains_key(id)));
+    let _ = SAVED.wait_timeout_while(unsaved, limit, busy);
+}
 /// How long after the last change the editor saves.
 const SAVE_AFTER: Duration = Duration::from_secs(1);
 /// How often old captures are looked for.
@@ -145,6 +183,12 @@ fn forget_copied() {
 /// How often the clipboard is looked at while copied files lie around.
 const COPIED_CHECK: Duration = Duration::from_secs(20);
 
+/// The capture open in the library's editor, if one is.
+fn open_capture_id(cx: &mut App) -> Option<String> {
+    let shown = cx.try_global::<Open>().and_then(|o| o.0.clone())?;
+    shown.update(cx, |this, _, _| this.editor.as_ref().map(|ed| ed.entry.id.clone())).flatten()
+}
+
 /// The pasteboard's change count, which goes up whenever anything is put
 /// on it.
 fn pasteboard_count() -> isize {
@@ -155,18 +199,28 @@ fn pasteboard_count() -> isize {
 pub fn init(cx: &mut App) {
     // Files from a copy before a crash, or before the last quit.
     cx.background_executor().spawn(async { forget_copied() }).detach();
-    cx.on_app_quit(|_| {
+    cx.on_app_quit(|cx| {
+        // What the editor has open is kept, and every save is written.
+        if let Some(shown) = cx.try_global::<Open>().and_then(|o| o.0.clone()) {
+            shown.update(cx, |this, window, cx| {
+                this.commit_text(window, cx);
+                if let Some(ed) = this.editor.take() {
+                    this.keep_changes(ed, cx);
+                }
+            });
+        }
+        wait_saved(None, Duration::from_secs(5));
         forget_copied();
         async {}
     })
     .detach();
     cx.spawn(async move |cx| {
         loop {
-            let days = cx.update(|cx| prefs::get(cx).keep_days);
+            let (days, open) = cx.update(|cx| (prefs::get(cx).keep_days, open_capture_id(cx)));
             if let Some(days) = days {
                 let max_age = i64::from(days) * 86_400_000;
                 let now = chrono::Utc::now().timestamp_millis();
-                let gone = cx.background_executor().spawn(async move { vault().map(|v| v.prune(max_age, now)) }).await;
+                let gone = cx.background_executor().spawn(async move { vault().map(|v| v.prune(max_age, now, open.as_deref())) }).await;
                 match gone {
                     Ok(0) => {},
                     Ok(n) => {
@@ -357,19 +411,30 @@ pub fn open_files(cx: &mut App) {
                 let v = vault()?;
                 let mut last = None;
                 let mut failed = Vec::new();
+                let mut not_kept = None;
                 for path in &paths {
+                    let name = || path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
                     match store::open(path) {
-                        Ok(img) => last = Some(v.add(&img, scale)?),
-                        Err(_) => failed.push(path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())),
+                        // One the library can't keep doesn't stop the others.
+                        Ok(img) => match v.add(&img, scale) {
+                            Ok(e) => last = Some(e),
+                            Err(e) => {
+                                not_kept.get_or_insert(format!("{}: {e}", name()));
+                            },
+                        },
+                        Err(_) => failed.push(name()),
                     }
                 }
-                Ok::<_, String>((last, failed))
+                Ok::<_, String>((last, failed, not_kept))
             })
             .await;
         cx.update(|cx| match added {
-            Ok((last, failed)) => {
+            Ok((last, failed, not_kept)) => {
                 if !failed.is_empty() {
                     capture::notify("Some files couldn't be opened", &format!("Not an image Gannet can read: {}", failed.join(", ")), cx);
+                }
+                if let Some(e) = not_kept {
+                    capture::notify("Couldn't keep a file in the library", &e, cx);
                 }
                 refresh(cx);
                 if let Some(e) = last {
@@ -401,8 +466,8 @@ pub struct Library {
     opening: Option<String>,
     /// The captures picked in the grid, in the order picked.
     selected: Vec<String>,
-    /// Where a ⇧-click range starts.
-    anchor: Option<usize>,
+    /// The capture a ⇧-click range starts at.
+    anchor: Option<String>,
     /// The side list's rows as last laid out, and its scrolling.
     side_rows: std::cell::RefCell<Rc<Vec<SideRow>>>,
     side_list: ListState,
@@ -414,6 +479,8 @@ pub struct Library {
     grid_key: std::cell::RefCell<Option<RowsKey>>,
     /// Counts the times the captures were listed (and the folders read).
     listed: u64,
+    /// Listings asked for: only the latest one asked for is shown.
+    listings: u64,
     /// The window's width at the last frame, for the grid's columns.
     window_width: std::cell::Cell<f32>,
     /// Scroll the side list to the open capture at the next frame.
@@ -1040,9 +1107,10 @@ impl Library {
         toolbar::library_open(true, cx);
         dock::set(dock::Window::Library, true, cx);
         let me = cx.entity().downgrade();
-        window.on_window_should_close(cx, move |_, cx| {
-            // What the editor has open is kept.
+        window.on_window_should_close(cx, move |window, cx| {
+            // What the editor has open is kept, with the text being typed.
             let _ = me.update(cx, |this, cx| {
+                this.commit_text(window, cx);
                 if let Some(ed) = this.editor.take() {
                     this.keep_changes(ed, cx);
                 }
@@ -1076,6 +1144,7 @@ impl Library {
             side_key: Default::default(),
             grid_key: Default::default(),
             listed: 0,
+            listings: 0,
             window_width: std::cell::Cell::new(1200.),
             title: TITLE.to_owned(),
             expanded: false,
@@ -1097,12 +1166,18 @@ impl Library {
     /// List the captures again and fetch the thumbnails not yet shown.
     fn reload(&mut self, cx: &mut Context<Self>) {
         let read_folders = !self.folders_loaded;
+        self.listings += 1;
+        let listing = self.listings;
         cx.spawn(async move |this, cx| {
             let listed = cx
                 .background_executor()
                 .spawn(async move { vault().map(|v| (v.list(), read_folders.then(|| v.folders()), v.trash())) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                // A later listing, asked for since, is the one to show.
+                if this.listings != listing {
+                    return;
+                }
                 match listed {
                     Ok((entries, folders, trash)) => {
                         this.error = None;
@@ -1187,9 +1262,21 @@ impl Library {
     }
 
     fn save_folders(&mut self, cx: &mut Context<Self>) {
-        let folders = self.folders.clone();
+        /// The folders to write next: each write takes the latest, so one
+        /// finishing late never puts older folders back.
+        static NEXT: std::sync::Mutex<Option<Folders>> = std::sync::Mutex::new(None);
+        static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        *NEXT.lock().unwrap_or_else(|e| e.into_inner()) = Some(self.folders.clone());
+        // Under way at once, so quitting can wait for it.
+        let saving = Saving::new("folders");
+        let saved = cx.background_executor().spawn(async move {
+            let _saving = saving;
+            let _held = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(folders) = NEXT.lock().unwrap_or_else(|e| e.into_inner()).take() else { return Ok(()) };
+            vault()?.save_folders(&folders)
+        });
         cx.spawn(async move |_, cx| {
-            let saved = cx.background_executor().spawn(async move { vault()?.save_folders(&folders) }).await;
+            let saved = saved.await;
             if let Err(e) = saved {
                 cx.update(|cx| capture::notify("Couldn't keep the folders", &e, cx));
             }
@@ -1235,8 +1322,13 @@ impl Library {
     fn start_rename(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(name) = self.folders.get(id).map(|f| f.name.clone()) else { return };
         let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
-        let sub = cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, _, cx| match ev {
-            InputEvent::PressEnter { .. } | InputEvent::Blur => this.finish_rename(cx),
+        let sub = cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { .. } => {
+                this.finish_rename(cx);
+                // Back to the library, for its keys.
+                window.focus(&this.focus, cx);
+            },
+            InputEvent::Blur => this.finish_rename(cx),
             _ => {},
         });
         let handle = input.focus_handle(cx);
@@ -1483,7 +1575,7 @@ impl Library {
         if m.shift || m.secondary() {
             return self.toggle_card(i, m.shift, cx);
         }
-        self.anchor = Some(i);
+        self.anchor = Some(e.id.clone());
         self.expanded = false;
         self.open_capture(e, cx);
     }
@@ -1491,13 +1583,23 @@ impl Library {
     /// Pick card `i`, or let it go; with `range`, pick every card from the
     /// last one clicked to `i`.
     fn toggle_card(&mut self, i: usize, range: bool, cx: &mut Context<Self>) {
-        let Some(e) = self.entries.get(i) else { return };
+        let Some(e) = self.entries.get(i).cloned() else { return };
         if range {
-            let from = self.anchor.unwrap_or(i);
-            let (a, b) = (from.min(i), from.max(i));
-            for e in &self.entries[a..=b] {
-                if !self.selected.contains(&e.id) {
-                    self.selected.push(e.id.clone());
+            // In the order shown: by folder, folded ones left out but for
+            // the ends of the range.
+            let mut shown: Vec<String> = Vec::new();
+            for (folder, _, entries) in self.groups() {
+                let folded = self.folded.contains(&folder);
+                let ends = |id: &String| *id == e.id || Some(id) == self.anchor.as_ref();
+                shown.extend(entries.into_iter().map(|x| x.id).filter(|id| !folded || ends(id)));
+            }
+            let to = shown.iter().position(|id| *id == e.id);
+            let from = self.anchor.as_ref().and_then(|a| shown.iter().position(|id| id == a)).or(to);
+            if let (Some(from), Some(to)) = (from, to) {
+                for id in &shown[from.min(to)..=from.max(to)] {
+                    if !self.selected.contains(id) {
+                        self.selected.push(id.clone());
+                    }
                 }
             }
         } else {
@@ -1507,7 +1609,7 @@ impl Library {
                 },
                 None => self.selected.push(e.id.clone()),
             }
-            self.anchor = Some(i);
+            self.anchor = Some(e.id);
         }
         cx.notify();
     }
@@ -1706,6 +1808,9 @@ impl Library {
             let loaded = cx
                 .background_executor()
                 .spawn(async move {
+                    // A save of it just started (switching away and back
+                    // quickly) is written before it is read.
+                    wait_saved(Some(&id), Duration::from_secs(30));
                     let editable = {
                         let _writes = VAULT_WRITES.lock();
                         vault()?.load_editable(&id)?
@@ -1777,36 +1882,35 @@ impl Library {
         let original = ed.original.clone();
         let (edits, images) = (ed.edits.clone(), ed.images.clone());
         let n = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        cx.spawn(async move |this, cx| {
-            let key = id.clone();
-            let saved = cx
-                .background_executor()
-                .spawn(async move {
-                    let img = edits::render(&original, &edits.done, scale, &images, raster::font());
-                    let thumb = vault::thumbnail(&img);
-                    // Encoded before the files are held: opening another
-                    // capture waits only for the writing.
-                    let png = store::png_bytes(&img)?;
-                    let mut writes = VAULT_WRITES.lock().unwrap_or_else(|e| e.into_inner());
-                    let latest = writes.get_or_insert_default();
-                    if latest.get(&id).is_some_and(|&m| m > n) {
-                        return Ok(None);
-                    }
-                    latest.insert(id.clone(), n);
-                    vault()?.save_edits(&id, &edits, &images, &img, Some(&png), scale)?;
-                    Ok::<_, String>(Some(thumb))
-                })
-                .await;
-            match saved {
-                Ok(Some(thumb)) => {
-                    let _ = this.update(cx, |this, cx| {
-                        this.keep_thumb(key, thumb);
-                        cx.notify();
-                    });
-                },
-                Ok(None) => {},
-                Err(e) => cx.update(|cx| capture::notify("Couldn't keep the changes", &e, cx)),
+        let saving = Saving::new(&id);
+        let key = id.clone();
+        // Under way at once, not when the main thread next gets to it, so
+        // quitting can wait for it.
+        let saved = cx.background_executor().spawn(async move {
+            let _saving = saving;
+            let img = edits::render(&original, &edits.done, scale, &images, raster::font());
+            let thumb = vault::thumbnail(&img);
+            // Encoded before the files are held: opening another
+            // capture waits only for the writing.
+            let png = store::png_bytes(&img)?;
+            let mut writes = VAULT_WRITES.lock().unwrap_or_else(|e| e.into_inner());
+            let latest = writes.get_or_insert_default();
+            if latest.get(&id).is_some_and(|&m| m > n) {
+                return Ok(None);
             }
+            latest.insert(id.clone(), n);
+            vault()?.save_edits(&id, &edits, &images, &img, Some(&png), scale)?;
+            Ok::<_, String>(Some(thumb))
+        });
+        cx.spawn(async move |this, cx| match saved.await {
+            Ok(Some(thumb)) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.keep_thumb(key, thumb);
+                    cx.notify();
+                });
+            },
+            Ok(None) => {},
+            Err(e) => cx.update(|cx| capture::notify("Couldn't keep the changes", &e, cx)),
         })
         .detach();
     }
@@ -2370,6 +2474,10 @@ impl Library {
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.focus.is_focused(window) {
+            // Esc in the text box ends the typing.
+            if ev.keystroke.key == "escape" && self.editor.as_ref().is_some_and(|ed| ed.text.is_some()) {
+                self.commit_text(window, cx);
+            }
             return;
         }
         let ks = &ev.keystroke;

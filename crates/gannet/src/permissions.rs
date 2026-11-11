@@ -89,13 +89,26 @@ pub fn can_relaunch() -> bool {
 }
 
 /// Quit and open again, so a permission granted while running takes;
-/// with `settings`, on the Settings window.
-pub fn relaunch(settings: bool, cx: &mut App) {
-    let Some(app) = bundle_path() else { return };
-    let script = if settings { "sleep 1; /usr/bin/open \"$0\" --args --settings" } else { "sleep 1; /usr/bin/open \"$0\"" };
-    let spawned = std::process::Command::new("/bin/sh").args(["-c", script]).arg(&app).spawn();
+/// with `settings`, on the Settings window. Whether it will (it quits).
+pub fn relaunch(settings: bool, cx: &mut App) -> bool {
+    let Some(app) = bundle_path() else { return false };
+    // Opened once this process is gone (`open` would only bring it to the
+    // front), however long quitting takes; ten seconds at most.
+    let wait = "i=0; while kill -0 \"$1\" 2>/dev/null && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done";
+    let open = if settings { "/usr/bin/open \"$0\" --args --settings" } else { "/usr/bin/open \"$0\"" };
+    let spawned = std::process::Command::new("/bin/sh")
+        .args(["-c", &format!("{wait}; {open}")])
+        .arg(&app)
+        .arg(std::process::id().to_string())
+        .spawn();
     match spawned {
-        Ok(_) => cx.quit(),
-        Err(e) => log::error!("can't reopen Gannet: {e}"),
+        Ok(_) => {
+            cx.quit();
+            true
+        },
+        Err(e) => {
+            log::error!("can't reopen Gannet: {e}");
+            false
+        },
     }
 }

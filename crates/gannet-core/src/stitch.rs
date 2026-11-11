@@ -55,14 +55,14 @@ pub struct Stitcher {
 impl Stitcher {
     /// Start with the first frame, whole.
     pub fn new(first: RgbaImage) -> Self {
-        let mut rows = Vec::with_capacity(first.as_raw().len() * 4);
+        let mut rows = Vec::with_capacity(first.as_raw().len() * 2);
         rows.extend_from_slice(first.as_raw());
         Self { width: first.width(), height: first.height(), rows, last: first }
     }
 
     /// The tallest the picture may get, in pixels.
     fn max_height(&self) -> usize {
-        (MAX_BYTES / self.row_bytes().max(1)).clamp(self.height as usize, MAX_HEIGHT as usize)
+        (MAX_BYTES / self.row_bytes().max(1)).min(MAX_HEIGHT as usize).max(self.height as usize)
     }
 
     /// The picture's height so far, in pixels.
